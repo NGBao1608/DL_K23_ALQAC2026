@@ -73,15 +73,6 @@ Nộp bằng cách **upload file `submission.json` lên trang leaderboard**. Gi�
 
 Nên tự chấm offline trên public test trước, chỉ nộp cấu hình tốt hơn.
 
-## Cấu trúc repo
-
-```
-├── ALQAC2026_final.ipynb     # pipeline hoàn chỉnh (chạy trên Colab)
-├── src/                      # code: load data, retrieval, agent, gọi API, ...
-├── data/raw/                 # đặt corpus + public test vào đây (git-ignored)
-├── requirements.txt
-└── README.md
-```
 
 ## Lưu ý
 
