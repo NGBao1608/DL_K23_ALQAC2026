@@ -86,7 +86,7 @@ Mở zip kiểm tra có README, config, source, scripts, notebooks, tests và do
 
 | Failure | Action |
 |---|---|
-| `403` API | Kiểm tra Kaggle/Colab secret và token name; không retry hàng loạt |
+| `403` API | Xem `server`, `content_type`, `request_id`, `response` trong lỗi; xác nhận secret không có dấu nháy/prefix thừa và token đã được BTC kích hoạt. Client tự trim whitespace nhưng không retry 403. Nếu response đến từ ngrok/gateway thay vì Case API, gửi diagnostic không chứa token cho BTC. |
 | `422` API | Kiểm tra case ID/query schema |
 | `429/5xx` API | Client tự backoff; resume cùng run/cache |
 | CUDA OOM khi retrieval | Giảm reranker batch size, build contexts trước rồi release models |

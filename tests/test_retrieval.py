@@ -7,9 +7,12 @@ from alqac2026.law_retrieval import reciprocal_rank_fusion
 
 
 class FakeResponse:
-    def __init__(self, status_code, payload):
+    def __init__(self, status_code, payload, text="", headers=None):
         self.status_code = status_code
         self._payload = payload
+        self.text = text
+        self.headers = headers or {}
+        self.url = "https://example.test/retrieve"
 
     def json(self):
         return self._payload
@@ -22,8 +25,10 @@ class FakeResponse:
 class FakeSession:
     def __init__(self, responses):
         self.responses = iter(responses)
+        self.calls = []
 
     def post(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
         return next(self.responses)
 
 
@@ -69,4 +74,39 @@ def test_api_retry_then_cache_hit(tmp_path):
     assert first == second
     assert client.network_calls == 2
     assert client.cache_hits == 1
+    cache.close()
+
+
+def test_api_strips_secret_and_redacts_403_diagnostics(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    session = FakeSession(
+        [
+            FakeResponse(
+                403,
+                {},
+                text="Forbidden for secret-token",
+                headers={"Content-Type": "application/json", "Server": "test"},
+            )
+        ]
+    )
+    client = CaseContentClient(
+        token="  secret-token\n",
+        base_url="https://example.test",
+        cache=cache,
+        request_interval_seconds=0,
+        session=session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+
+    try:
+        client.retrieve("case_1", "query")
+    except PermissionError as error:
+        message = str(error)
+    else:
+        raise AssertionError("Expected a 403 PermissionError")
+
+    assert session.calls[0][1]["headers"]["X-API-Key"] == "secret-token"
+    assert "secret-token" not in message
+    assert "response=Forbidden for <redacted>" in message
     cache.close()

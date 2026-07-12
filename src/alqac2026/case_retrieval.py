@@ -124,6 +124,7 @@ class CaseContentClient:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ):
+        token = token.strip()
         if not token:
             raise ValueError("ALQAC_TEAM_TOKEN is required")
         self.token = token
@@ -169,7 +170,19 @@ class CaseContentClient:
                 self.cache.put(case_id, query, results)
                 return results
             if response.status_code == 403:
-                raise PermissionError("Case API rejected ALQAC_TEAM_TOKEN (403)")
+                content_type = response.headers.get("Content-Type", "unknown")
+                server = response.headers.get("Server", "unknown")
+                request_id = response.headers.get(
+                    "X-Request-ID", response.headers.get("X-Amzn-Trace-Id", "unknown")
+                )
+                response_preview = re.sub(r"\s+", " ", response.text).strip()[:300]
+                if self.token:
+                    response_preview = response_preview.replace(self.token, "<redacted>")
+                raise PermissionError(
+                    "Case API rejected ALQAC_TEAM_TOKEN (403); "
+                    f"url={response.url}; server={server}; content_type={content_type}; "
+                    f"request_id={request_id}; response={response_preview or '<empty>'}"
+                )
             if response.status_code == 422:
                 raise ValueError(f"Malformed Case API request: {payload}")
             if response.status_code == 429 or 500 <= response.status_code < 600:
@@ -206,4 +219,3 @@ class CaseEvidenceRetriever:
                 if previous is None or item.score > previous.score:
                     evidence[item.chunk_id] = item
         return list(evidence.values()), self.client.network_calls - before
-
