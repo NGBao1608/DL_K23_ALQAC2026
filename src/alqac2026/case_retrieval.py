@@ -152,7 +152,13 @@ class CaseContentClient:
             return cached
 
         payload = {"case_id": case_id, "query": query}
-        headers = {"X-API-Key": self.token, "Content-Type": "application/json"}
+        headers = {
+            "X-API-Key": self.token,
+            "Content-Type": "application/json",
+            # The official API is exposed through a free ngrok tunnel. This header
+            # prevents ngrok's browser-warning HTML from intercepting API requests.
+            "ngrok-skip-browser-warning": "alqac2026-api-client",
+        }
         for attempt in range(self.retries):
             self._throttle()
             response = self.session.post(
@@ -175,13 +181,15 @@ class CaseContentClient:
                 request_id = response.headers.get(
                     "X-Request-ID", response.headers.get("X-Amzn-Trace-Id", "unknown")
                 )
+                ngrok_codes = sorted(set(re.findall(r"ERR_NGROK_\d+", response.text)))
                 response_preview = re.sub(r"\s+", " ", response.text).strip()[:300]
                 if self.token:
                     response_preview = response_preview.replace(self.token, "<redacted>")
                 raise PermissionError(
                     "Case API rejected ALQAC_TEAM_TOKEN (403); "
                     f"url={response.url}; server={server}; content_type={content_type}; "
-                    f"request_id={request_id}; response={response_preview or '<empty>'}"
+                    f"request_id={request_id}; ngrok_codes={ngrok_codes or 'none'}; "
+                    f"response={response_preview or '<empty>'}"
                 )
             if response.status_code == 422:
                 raise ValueError(f"Malformed Case API request: {payload}")

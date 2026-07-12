@@ -107,6 +107,10 @@ def test_api_strips_secret_and_redacts_403_diagnostics(tmp_path):
         raise AssertionError("Expected a 403 PermissionError")
 
     assert session.calls[0][1]["headers"]["X-API-Key"] == "secret-token"
+    assert (
+        session.calls[0][1]["headers"]["ngrok-skip-browser-warning"]
+        == "alqac2026-api-client"
+    )
     assert "secret-token" not in message
     assert "response=Forbidden for <redacted>" in message
     cache.close()
