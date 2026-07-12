@@ -1,0 +1,68 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.so
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Build and package artifacts
+build/
+dist/
+*.egg-info/
+
+# Model weights and ML caches
+models/
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+.cache/
+huggingface/
+wandb/
+mlruns/
+
+# Runtime caches, logs, and experiment outputs
+cache/
+logs/
+outputs/
+runs/
+artifacts/
+evidence_cache*.json
+*.log
+
+# Submission artifacts and local submission counter
+submissions/
+submission.json
+.submit_count.json
+
+# Private test data must not be committed
+data/raw/private_test*.json
+data/private/
+
+# Kaggle and Colab working artifacts
+kaggle.json
+alqac2026_starter.zip

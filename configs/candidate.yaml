@@ -1,0 +1,39 @@
+run:
+  name: qwen3_hybrid_candidate
+  seed: 42
+
+paths:
+  corpus: data/raw/corpus_law_pub.json
+  public_test: data/raw/ALQAC2026_public_test.json
+  private_test: data/private/private_test.json
+  cache_db: cache/case_api.sqlite
+  law_index: cache/law_index
+  output_dir: outputs
+
+case_retrieval:
+  api_base: https://alqac-api.ngrok.pro
+  max_queries: 8
+  request_interval_seconds: 5.0
+  timeout_seconds: 30
+  retries: 4
+
+law_retrieval:
+  strategy: hybrid_rerank
+  embedding_model: AITeamVN/Vietnamese_Embedding
+  embedding_revision: dea33aa1ab339f38d66ae0a40e6c40e0a9249568
+  reranker_model: AITeamVN/Vietnamese_Reranker
+  reranker_revision: f536976248403314225d7fdfdbc87f0e9516a54e
+  sparse_k: 50
+  dense_k: 50
+  candidate_k: 30
+  top_k: 5
+  rrf_k: 60
+  batch_size: 16
+
+prediction:
+  model_name: Qwen/Qwen3-8B
+  revision: b968826d9c46dd6066d109eabc6255188de91218
+  load_in_4bit: true
+  max_input_tokens: 7000
+  max_new_tokens: 384
+  thinking: false
