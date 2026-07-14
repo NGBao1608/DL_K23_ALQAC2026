@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import os
+import hashlib
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 from .case_retrieval import (
     CaseContentClient,
     CaseEvidenceRetriever,
+    EvidenceQueryGenerator,
     SQLiteEvidenceCache,
+    build_api_plan,
 )
 from .config import (
     build_environment,
@@ -45,8 +48,18 @@ def run_experiment(
     public_gold_path: str | Path | None = None,
     mock: bool = False,
     limit: int | None = None,
+    cache_db: str | Path | None = None,
+    max_network_calls: int | None = None,
 ) -> dict:
     config = load_config(config_path)
+    if cache_db is not None:
+        config["paths"]["cache_db"] = str(Path(cache_db))
+    if not mock and max_network_calls is None:
+        raise ValueError(
+            "Non-mock runs require an explicit max_network_calls budget"
+        )
+    if max_network_calls is not None and max_network_calls < 0:
+        raise ValueError("max_network_calls must be non-negative")
     set_seed(int(config["run"].get("seed", 42)))
     corpus_path = Path(config["paths"]["corpus"])
     articles = load_law_corpus(corpus_path)
@@ -79,6 +92,9 @@ def run_experiment(
         if previous_run != resolved_run:
             raise ValueError("Cannot resume with different config, input, mock mode, or limit")
     write_json(resolved_path, resolved_run)
+    run_key = hashlib.sha256(
+        json.dumps(resolved_run, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
 
     manifest = build_manifest(config, corpus_path)
     manifest["run"] = {
@@ -113,6 +129,9 @@ def run_experiment(
             else:
                 prepared_by_id[case.case_id] = prepared
 
+        if not mock:
+            cache = SQLiteEvidenceCache(config["paths"]["cache_db"])
+
         if to_prepare:
             law_config = dict(config["law_retrieval"])
             law_config["index_dir"] = config["paths"]["law_index"]
@@ -122,8 +141,33 @@ def run_experiment(
             if mock:
                 case_retriever = EmptyCaseRetriever()
             else:
+                query_generator = EvidenceQueryGenerator()
+                api_plan = build_api_plan(
+                    to_prepare,
+                    cache,
+                    max_queries=int(config["case_retrieval"]["max_queries"]),
+                    approved_max_network_calls=max_network_calls,
+                    query_generator=query_generator,
+                )
+                run_attempts_before = cache.run_attempt_stats(run_key)[
+                    "network_attempts"
+                ]
+                api_plan["run_key"] = run_key
+                api_plan["run_network_attempts_before"] = run_attempts_before
+                api_plan["remaining_approved_attempts"] = (
+                    int(max_network_calls) - run_attempts_before
+                )
+                write_json(run_dir / "api_plan.json", api_plan)
+                minimum_total_attempts = (
+                    run_attempts_before + api_plan["cache_misses"]
+                )
+                if minimum_total_attempts > int(max_network_calls):
+                    raise ValueError(
+                        "Approved API budget is smaller than the run attempts already "
+                        "used plus current cache misses: "
+                        f"{max_network_calls} < {minimum_total_attempts}"
+                    )
                 token = os.getenv("ALQAC_TEAM_TOKEN", "")
-                cache = SQLiteEvidenceCache(config["paths"]["cache_db"])
                 client = CaseContentClient(
                     token=token,
                     base_url=config["case_retrieval"]["api_base"],
@@ -133,9 +177,12 @@ def run_experiment(
                     ),
                     timeout_seconds=int(config["case_retrieval"]["timeout_seconds"]),
                     retries=int(config["case_retrieval"]["retries"]),
+                    max_network_calls=max_network_calls,
+                    run_key=run_key,
                 )
                 case_retriever = CaseEvidenceRetriever(
                     client,
+                    query_generator=query_generator,
                     max_queries=int(config["case_retrieval"]["max_queries"]),
                 )
             preparation_pipeline = ALQACPipeline(
@@ -179,27 +226,21 @@ def run_experiment(
             write_json(run_dir / "metrics.json", metrics)
             write_json(run_dir / "errors.json", build_error_analysis(results, gold))
 
+        run_network_attempts = (
+            cache.run_attempt_stats(run_key)["network_attempts"]
+            if cache is not None
+            else 0
+        )
         manifest["run"].update(
             {
                 "status": "completed",
                 "completed": sum(result.status == "completed" for result in results),
-                "api_calls": sum(result.api_calls for result in results),
+                "api_calls": run_network_attempts,
             }
         )
         write_json(
             run_dir / "api_stats.json",
-            {
-                "total_calls": sum(result.api_calls for result in results),
-                "per_case": {
-                    result.case_id: result.api_calls for result in results
-                },
-                "current_process_network_calls": (
-                    client.network_calls if client is not None else 0
-                ),
-                "current_process_cache_hits": (
-                    client.cache_hits if client is not None else 0
-                ),
-            },
+            _api_stats(cases, client, cache, run_key, max_network_calls),
         )
         write_json(run_dir / "manifest.json", manifest)
         return {
@@ -208,6 +249,11 @@ def run_experiment(
             "metrics": metrics,
         }
     except Exception as error:
+        run_network_attempts = (
+            cache.run_attempt_stats(run_key)["network_attempts"]
+            if cache is not None
+            else 0
+        )
         manifest["run"].update(
             {
                 "status": "failed",
@@ -215,31 +261,46 @@ def run_experiment(
                     record.get("status") == "completed"
                     for record in checkpoint.records.values()
                 ),
-                "api_calls": sum(
-                    int(record.get("api_calls", 0))
-                    for record in checkpoint.records.values()
-                ),
+                "api_calls": run_network_attempts,
                 "error": f"{type(error).__name__}: {error}",
             }
         )
         write_json(
             run_dir / "api_stats.json",
-            {
-                "total_calls": manifest["run"]["api_calls"],
-                "per_case": {
-                    case_id: int(record.get("api_calls", 0))
-                    for case_id, record in checkpoint.records.items()
-                },
-                "current_process_network_calls": (
-                    client.network_calls if client is not None else 0
-                ),
-                "current_process_cache_hits": (
-                    client.cache_hits if client is not None else 0
-                ),
-            },
+            _api_stats(cases, client, cache, run_key, max_network_calls),
         )
         write_json(run_dir / "manifest.json", manifest)
         raise
     finally:
         if cache is not None:
             cache.close()
+
+
+def _api_stats(cases, client, cache, run_key, max_network_calls) -> dict:
+    ledger_stats = (
+        cache.run_attempt_stats(run_key)
+        if cache is not None
+        else {"network_attempts": 0, "successful_calls": 0, "per_case": {}}
+    )
+    per_case = {}
+    for case in cases:
+        ledger_case = ledger_stats["per_case"].get(case.case_id, {})
+        per_case[case.case_id] = {
+            "network_attempts": int(ledger_case.get("network_attempts", 0)),
+            "successful_calls": int(ledger_case.get("successful_calls", 0)),
+            "cache_hits": (
+                int(client.per_case_cache_hits.get(case.case_id, 0)) if client else 0
+            ),
+        }
+    return {
+        "run_key": run_key,
+        "approved_max_network_calls": max_network_calls,
+        "run_network_attempts": int(ledger_stats["network_attempts"]),
+        "run_successful_calls": int(ledger_stats["successful_calls"]),
+        "run_cache_hits": client.cache_hits if client else 0,
+        "per_case": per_case,
+        "known_local_cumulative_attempts": (
+            cache.known_cumulative_attempts() if cache is not None else 0
+        ),
+        "official_cumulative_calls": None,
+    }

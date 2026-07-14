@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -15,6 +16,10 @@ from .schemas import CaseEvidence, InferenceCase
 
 
 API_VERSION = "retrieve-v1"
+
+
+class ApiBudgetExceeded(RuntimeError):
+    """Raised before an HTTP request would exceed the approved run budget."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,13 +48,20 @@ class EvidenceQueryGenerator:
     )
 
     def generate(self, case_query: str, max_queries: int = 8) -> list[EvidenceQuery]:
-        queries = [EvidenceQuery(text, query_type) for text, query_type in self.TEMPLATES]
+        if max_queries < 0:
+            raise ValueError("max_queries must be non-negative")
+        original = EvidenceQuery(normalize_query(case_query)[:500], "original")
+        queries = [
+            EvidenceQuery(*self.TEMPLATES[0]),
+            original,
+            *(
+                EvidenceQuery(text, query_type)
+                for text, query_type in self.TEMPLATES[1:]
+            ),
+        ]
         match = re.search(r"tranh chấp[^.,;?]*", case_query, flags=re.IGNORECASE)
         if match:
             queries.append(EvidenceQuery(match.group(0).strip(), "dispute_type"))
-        queries.append(
-            EvidenceQuery(re.sub(r"\s+", " ", case_query).strip()[:500], "original")
-        )
         result: list[EvidenceQuery] = []
         seen: set[str] = set()
         for query in queries:
@@ -79,6 +91,26 @@ class SQLiteEvidenceCache:
             )
             """
         )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                run_key TEXT,
+                case_id TEXT NOT NULL,
+                query_type TEXT NOT NULL,
+                query_hash TEXT NOT NULL,
+                status_code INTEGER,
+                exception_type TEXT,
+                success INTEGER NOT NULL
+            )
+            """
+        )
+        columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(api_call_log)")
+        }
+        if "run_key" not in columns:
+            self.connection.execute("ALTER TABLE api_call_log ADD COLUMN run_key TEXT")
         self.connection.commit()
 
     def get(self, case_id: str, query: str) -> list[dict] | None:
@@ -107,6 +139,75 @@ class SQLiteEvidenceCache:
         )
         self.connection.commit()
 
+    def contains(self, case_id: str, query: str) -> bool:
+        key = cache_key(case_id, query)
+        row = self.connection.execute(
+            "SELECT 1 FROM evidence_cache WHERE cache_key = ?", (key,)
+        ).fetchone()
+        return row is not None
+
+    def log_attempt(
+        self,
+        case_id: str,
+        query: str,
+        query_type: str,
+        *,
+        run_key: str = "unscoped",
+        status_code: int | None = None,
+        exception_type: str | None = None,
+        success: bool = False,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO api_call_log
+            (created_at, run_key, case_id, query_type, query_hash, status_code,
+             exception_type, success)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                time.time(),
+                run_key,
+                case_id,
+                query_type,
+                cache_key(case_id, query),
+                status_code,
+                exception_type,
+                int(success),
+            ),
+        )
+        self.connection.commit()
+
+    def known_cumulative_attempts(self) -> int:
+        row = self.connection.execute("SELECT COUNT(*) FROM api_call_log").fetchone()
+        return int(row[0])
+
+    def run_attempt_stats(self, run_key: str) -> dict:
+        rows = self.connection.execute(
+            """
+            SELECT case_id, COUNT(*), SUM(success)
+            FROM api_call_log
+            WHERE run_key = ?
+            GROUP BY case_id
+            """,
+            (run_key,),
+        ).fetchall()
+        per_case = {
+            str(case_id): {
+                "network_attempts": int(attempts),
+                "successful_calls": int(successes or 0),
+            }
+            for case_id, attempts, successes in rows
+        }
+        return {
+            "network_attempts": sum(
+                item["network_attempts"] for item in per_case.values()
+            ),
+            "successful_calls": sum(
+                item["successful_calls"] for item in per_case.values()
+            ),
+            "per_case": per_case,
+        }
+
     def close(self) -> None:
         self.connection.close()
 
@@ -120,6 +221,8 @@ class CaseContentClient:
         request_interval_seconds: float = 5.0,
         timeout_seconds: int = 30,
         retries: int = 4,
+        max_network_calls: int | None = None,
+        run_key: str = "unscoped",
         session: requests.Session | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -133,22 +236,46 @@ class CaseContentClient:
         self.request_interval_seconds = request_interval_seconds
         self.timeout_seconds = timeout_seconds
         self.retries = retries
+        if max_network_calls is not None and max_network_calls < 0:
+            raise ValueError("max_network_calls must be non-negative")
+        self.max_network_calls = max_network_calls
+        self.run_key = run_key
         self.session = session or requests.Session()
         self.sleep = sleep
         self.clock = clock
         self._last_call = 0.0
-        self.network_calls = 0
+        existing_stats = self.cache.run_attempt_stats(run_key)
+        self.network_calls = int(existing_stats["network_attempts"])
+        self.successful_calls = int(existing_stats["successful_calls"])
         self.cache_hits = 0
+        self.per_case_attempts: dict[str, int] = defaultdict(int)
+        self.per_case_successes: dict[str, int] = defaultdict(int)
+        self.per_case_cache_hits: dict[str, int] = defaultdict(int)
 
     def _throttle(self) -> None:
         remaining = self.request_interval_seconds - (self.clock() - self._last_call)
         if remaining > 0:
             self.sleep(remaining)
 
-    def retrieve(self, case_id: str, query: str) -> list[dict]:
+    def _claim_network_budget(self, case_id: str) -> None:
+        if (
+            self.max_network_calls is not None
+            and self.network_calls >= self.max_network_calls
+        ):
+            raise ApiBudgetExceeded(
+                "Approved Case Content API network-call budget exhausted before "
+                f"requesting {case_id}: {self.max_network_calls}"
+            )
+        self.network_calls += 1
+        self.per_case_attempts[case_id] += 1
+
+    def retrieve(
+        self, case_id: str, query: str, query_type: str = "unknown"
+    ) -> list[dict]:
         cached = self.cache.get(case_id, query)
         if cached is not None:
             self.cache_hits += 1
+            self.per_case_cache_hits[case_id] += 1
             return cached
 
         payload = {"case_id": case_id, "query": query}
@@ -161,20 +288,75 @@ class CaseContentClient:
         }
         for attempt in range(self.retries):
             self._throttle()
-            response = self.session.post(
-                f"{self.base_url}/retrieve",
-                headers=headers,
-                json=payload,
-                timeout=self.timeout_seconds,
-            )
+            self._claim_network_budget(case_id)
+            try:
+                response = self.session.post(
+                    f"{self.base_url}/retrieve",
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+            except requests.RequestException as error:
+                self._last_call = self.clock()
+                self.cache.log_attempt(
+                    case_id,
+                    query,
+                    query_type,
+                    run_key=self.run_key,
+                    exception_type=type(error).__name__,
+                )
+                if attempt + 1 < self.retries:
+                    self.sleep(self.request_interval_seconds * (2**attempt))
+                    continue
+                raise
             self._last_call = self.clock()
-            self.network_calls += 1
             if response.status_code == 200:
-                results = response.json().get("results", [])
-                if not isinstance(results, list):
-                    raise ValueError("Case API results must be a list")
+                try:
+                    payload_value = response.json()
+                    if not isinstance(payload_value, dict):
+                        raise ValueError("Case API response must be a JSON object")
+                    results = payload_value.get("results", [])
+                    if not isinstance(results, list):
+                        raise ValueError("Case API results must be a list")
+                    if any(
+                        not isinstance(item, dict)
+                        or not isinstance(item.get("chunk_id"), str)
+                        or not item["chunk_id"].strip()
+                        for item in results
+                    ):
+                        raise ValueError(
+                            "Every Case API result must contain a non-empty opaque "
+                            "chunk_id"
+                        )
+                except Exception as error:
+                    self.cache.log_attempt(
+                        case_id,
+                        query,
+                        query_type,
+                        run_key=self.run_key,
+                        status_code=response.status_code,
+                        exception_type=type(error).__name__,
+                    )
+                    raise
+                self.cache.log_attempt(
+                    case_id,
+                    query,
+                    query_type,
+                    run_key=self.run_key,
+                    status_code=response.status_code,
+                    success=True,
+                )
+                self.successful_calls += 1
+                self.per_case_successes[case_id] += 1
                 self.cache.put(case_id, query, results)
                 return results
+            self.cache.log_attempt(
+                case_id,
+                query,
+                query_type,
+                run_key=self.run_key,
+                status_code=response.status_code,
+            )
             if response.status_code == 403:
                 content_type = response.headers.get("Content-Type", "unknown")
                 server = response.headers.get("Server", "unknown")
@@ -216,7 +398,9 @@ class CaseEvidenceRetriever:
         before = self.client.network_calls
         evidence: dict[str, CaseEvidence] = {}
         for query in self.query_generator.generate(case.case_query, self.max_queries):
-            for hit in self.client.retrieve(case.case_id, query.text):
+            for hit in self.client.retrieve(
+                case.case_id, query.text, query_type=query.query_type
+            ):
                 item = CaseEvidence(
                     chunk_id=str(hit["chunk_id"]),
                     text=str(hit.get("text", "")),
@@ -227,3 +411,36 @@ class CaseEvidenceRetriever:
                 if previous is None or item.score > previous.score:
                     evidence[item.chunk_id] = item
         return list(evidence.values()), self.client.network_calls - before
+
+
+def build_api_plan(
+    cases: list[InferenceCase],
+    cache: SQLiteEvidenceCache,
+    *,
+    max_queries: int,
+    approved_max_network_calls: int | None = None,
+    query_generator: EvidenceQueryGenerator | None = None,
+) -> dict:
+    generator = query_generator or EvidenceQueryGenerator()
+    per_case: dict[str, dict[str, int]] = {}
+    logical_queries = 0
+    cache_hits = 0
+    for case in cases:
+        case_queries = generator.generate(case.case_query, max_queries=max_queries)
+        hits = sum(cache.contains(case.case_id, query.text) for query in case_queries)
+        logical_queries += len(case_queries)
+        cache_hits += hits
+        per_case[case.case_id] = {
+            "logical_queries": len(case_queries),
+            "cache_hits": hits,
+            "cache_misses": len(case_queries) - hits,
+        }
+    return {
+        "logical_queries": logical_queries,
+        "cache_hits": cache_hits,
+        "cache_misses": logical_queries - cache_hits,
+        "approved_max_network_calls": approved_max_network_calls,
+        "known_local_cumulative_attempts": cache.known_cumulative_attempts(),
+        "official_cumulative_calls": None,
+        "per_case": per_case,
+    }

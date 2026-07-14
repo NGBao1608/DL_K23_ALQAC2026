@@ -1,8 +1,16 @@
+import pytest
+import requests
+
 from alqac2026.case_retrieval import (
+    ApiBudgetExceeded,
     CaseContentClient,
+    EvidenceQueryGenerator,
     SQLiteEvidenceCache,
+    build_api_plan,
     cache_key,
 )
+from alqac2026.law_retrieval import extract_law_citations
+from alqac2026.schemas import InferenceCase, LawArticle
 from alqac2026.law_retrieval import reciprocal_rank_fusion
 
 
@@ -29,7 +37,10 @@ class FakeSession:
 
     def post(self, *args, **kwargs):
         self.calls.append((args, kwargs))
-        return next(self.responses)
+        response = next(self.responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 def test_rrf_is_deterministic_and_rewards_overlap():
@@ -38,10 +49,50 @@ def test_rrf_is_deterministic_and_rewards_overlap():
     assert identifiers[:2] == [3, 2]
 
 
+def test_exact_law_citations_are_extracted_in_document_order():
+    articles = [
+        LawArticle("91/2015/QH13", 1001, 584, "Article 584"),
+        LawArticle("91/2015/QH13", 1002, 590, "Article 590"),
+        LawArticle("92/2015/QH13", 2001, 147, "Article 147"),
+    ]
+    text = (
+        "Căn cứ các Điều 584, Điều 590 của Bộ luật Dân sự năm 2015; "
+        "Điều 147 Bộ luật Tố tụng dân sự."
+    )
+    assert extract_law_citations(text, articles) == [
+        ("91/2015/QH13", 584),
+        ("91/2015/QH13", 590),
+        ("92/2015/QH13", 147),
+    ]
+
+
+def test_law_citation_extractor_ignores_articles_outside_corpus():
+    articles = [LawArticle("91/2015/QH13", 1001, 584, "Article 584")]
+    assert extract_law_citations(
+        "Điều 999 và Điều 584 Bộ luật Dân sự", articles
+    ) == [("91/2015/QH13", 584)]
+
+
+def test_law_citation_extractor_skips_explicit_wrong_law_year():
+    articles = [LawArticle("91/2015/QH13", 1001, 131, "Article 131")]
+    assert extract_law_citations(
+        "Áp dụng Điều 131 của Bộ luật Dân sự năm 1995", articles
+    ) == []
+
+
 def test_cache_key_normalizes_whitespace_and_case():
     assert cache_key("case_1", "  Nhận định   Tòa án ") == cache_key(
         "case_1", "nhận định tòa án"
     )
+
+
+def test_two_query_policy_is_deterministic():
+    generator = EvidenceQueryGenerator()
+    queries = generator.generate("  Tranh chấp   Hợp đồng  ", max_queries=2)
+    assert [(item.query_type, item.text) for item in queries] == [
+        ("court_decision", "quyết định của tòa án tuyên xử"),
+        ("original", "tranh chấp hợp đồng"),
+    ]
 
 
 def test_api_retry_then_cache_hit(tmp_path):
@@ -53,7 +104,11 @@ def test_api_retry_then_cache_hit(tmp_path):
                 200,
                 {
                     "results": [
-                        {"chunk_id": "case_1_chunk_2", "score": 1.0, "text": "x"}
+                        {
+                            "chunk_id": "case_1_seg_9b2898839a509e4f",
+                            "score": 1.0,
+                            "text": "x",
+                        }
                     ]
                 },
             ),
@@ -113,4 +168,135 @@ def test_api_strips_secret_and_redacts_403_diagnostics(tmp_path):
     )
     assert "secret-token" not in message
     assert "response=Forbidden for <redacted>" in message
+    cache.close()
+
+
+def test_api_budget_caps_retry_attempts(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    session = FakeSession(
+        [FakeResponse(503, {}), FakeResponse(200, {"results": []})]
+    )
+    client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=2,
+        max_network_calls=1,
+        request_interval_seconds=0,
+        session=session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    with pytest.raises(ApiBudgetExceeded, match="budget exhausted"):
+        client.retrieve("case_1", "query", query_type="original")
+    assert client.network_calls == 1
+    assert len(session.calls) == 1
+    assert cache.known_cumulative_attempts() == 1
+    cache.close()
+
+
+def test_api_budget_persists_across_client_resume(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    first_session = FakeSession([FakeResponse(200, {"results": []})])
+    first_client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=1,
+        run_key="stable-run",
+        request_interval_seconds=0,
+        session=first_session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    first_client.retrieve("case_1", "first query", query_type="original")
+
+    resumed_session = FakeSession([FakeResponse(200, {"results": []})])
+    resumed_client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=1,
+        run_key="stable-run",
+        request_interval_seconds=0,
+        session=resumed_session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    with pytest.raises(ApiBudgetExceeded, match="budget exhausted"):
+        resumed_client.retrieve("case_1", "second query", query_type="original")
+    assert resumed_client.network_calls == 1
+    assert resumed_session.calls == []
+    assert cache.run_attempt_stats("stable-run")["network_attempts"] == 1
+    cache.close()
+
+
+def test_timeout_is_counted_and_logged_without_secret(tmp_path):
+    path = tmp_path / "cache.sqlite"
+    cache = SQLiteEvidenceCache(path)
+    client = CaseContentClient(
+        token="secret-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=1,
+        request_interval_seconds=0,
+        session=FakeSession([requests.Timeout("network timeout")]),
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    with pytest.raises(requests.Timeout):
+        client.retrieve("case_1", "sensitive query", query_type="original")
+    row = cache.connection.execute(
+        "SELECT query_type, query_hash, exception_type FROM api_call_log"
+    ).fetchone()
+    assert row == (
+        "original",
+        cache_key("case_1", "sensitive query"),
+        "Timeout",
+    )
+    database_bytes = path.read_bytes()
+    assert b"secret-token" not in database_bytes
+    assert b"sensitive query" not in database_bytes
+    cache.close()
+
+
+def test_malformed_success_response_is_not_cached(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=1,
+        request_interval_seconds=0,
+        session=FakeSession(
+            [FakeResponse(200, {"results": [{"text": "missing id"}]})]
+        ),
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    with pytest.raises(ValueError, match="non-empty opaque chunk_id"):
+        client.retrieve("case_1", "query", query_type="original")
+    assert not cache.contains("case_1", "query")
+    assert cache.known_cumulative_attempts() == 1
+    assert cache.run_attempt_stats("unscoped")["successful_calls"] == 0
+    cache.close()
+
+
+def test_api_plan_counts_cache_hits_without_network_calls(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    case = InferenceCase("case_1", "Tranh chấp hợp đồng")
+    first_query = EvidenceQueryGenerator().generate(case.case_query, 2)[0]
+    cache.put(case.case_id, first_query.text, [])
+    report = build_api_plan(
+        [case], cache, max_queries=2, approved_max_network_calls=1
+    )
+    assert report["logical_queries"] == 2
+    assert report["cache_hits"] == 1
+    assert report["cache_misses"] == 1
+    assert report["approved_max_network_calls"] == 1
+    assert report["known_local_cumulative_attempts"] == 0
     cache.close()

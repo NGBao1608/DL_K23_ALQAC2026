@@ -1,5 +1,5 @@
 run:
-  name: qwen3_hybrid_candidate
+  name: qwen3_citation_hybrid_decision_v2
   seed: 42
 
 paths:
@@ -12,10 +12,10 @@ paths:
 
 case_retrieval:
   api_base: https://alqac-api.ngrok.pro
-  max_queries: 8
+  max_queries: 2
   request_interval_seconds: 5.0
   timeout_seconds: 30
-  retries: 4
+  retries: 2
 
 law_retrieval:
   strategy: hybrid_rerank
@@ -28,7 +28,8 @@ law_retrieval:
   candidate_k: 30
   top_k: 5
   rrf_k: 60
-  batch_size: 16
+  batch_size: 4
+  citation_k: 12
 
 prediction:
   model_name: Qwen/Qwen3-8B
@@ -37,3 +38,6 @@ prediction:
   max_input_tokens: 7000
   max_new_tokens: 384
   thinking: false
+  prompt_variant: decision_first_v2
+  case_evidence_chars: 2200
+  law_evidence_chars: 1200

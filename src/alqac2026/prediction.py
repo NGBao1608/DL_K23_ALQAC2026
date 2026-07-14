@@ -7,7 +7,7 @@ from typing import Protocol
 from .schemas import CaseEvidence, InferenceCase, LawEvidence, OutcomeLabel
 
 
-SYSTEM_PROMPT = """Bạn là hệ thống dự đoán kết quả vụ án dân sự Việt Nam.
+BASELINE_SYSTEM_PROMPT = """Bạn là hệ thống dự đoán kết quả vụ án dân sự Việt Nam.
 Dựa duy nhất trên mô tả tranh chấp, bằng chứng vụ án và điều luật được cung cấp,
 hãy xác định kết quả đối với yêu cầu chính của nguyên đơn.
 
@@ -20,6 +20,43 @@ Nhãn hợp lệ:
 Không suy diễn tình tiết không có trong evidence. Trả về đúng một JSON object:
 {"reasoning":"lập luận ngắn gọn theo Issue-Rule-Application-Conclusion","label":"NHÃN"}
 """
+
+
+DECISION_FIRST_SYSTEM_PROMPT = """Bạn là hệ thống phân loại kết quả vụ án dân sự Việt Nam.
+Chỉ sử dụng case_query, case evidence và law evidence được cung cấp. Không bổ sung
+tình tiết bên ngoài evidence.
+
+Thực hiện lần lượt:
+1. Xác định chính xác yêu cầu chính của nguyên đơn trong case_query.
+2. Tìm phần Tuyên xử, Quyết định hoặc câu thể hiện chấp nhận/bác yêu cầu trong case
+   evidence. Đây là nguồn ưu tiên cao nhất khi evidence có xung đột.
+3. Tách yêu cầu chính khỏi án phí, thủ tục tố tụng, yêu cầu độc lập của người khác và
+   các vấn đề phụ không quyết định thắng-thua của nguyên đơn.
+4. Đối chiếu phần được yêu cầu với phần được Tòa chấp nhận. Khi có số tiền, diện tích
+   hoặc nhiều cấu phần, hãy tính hoặc ước lượng tỷ lệ được chấp nhận.
+
+Quy tắc phân loại nội bộ của hệ thống:
+- A_WIN: toàn bộ yêu cầu chính của nguyên đơn được chấp nhận.
+- PARTIAL_A_WIN: chỉ một phần được chấp nhận và phần đó lớn hơn 50% yêu cầu chính.
+- PARTIAL_B_WIN: chỉ một phần được chấp nhận và phần đó không quá 50% yêu cầu chính.
+- B_WIN: toàn bộ yêu cầu chính bị bác hoặc nguyên đơn không nhận được phần nào.
+
+Nếu không đủ số liệu định lượng, đánh giá số lượng và tầm quan trọng của các cấu phần
+được chấp nhận. Không chọn A_WIN chỉ vì evidence có từ "chấp nhận" nếu quyết định thực
+tế chỉ chấp nhận một phần.
+
+Trả về đúng một JSON object, không markdown và không văn bản ngoài JSON:
+{"reasoning":"nêu yêu cầu chính, phần được chấp nhận và căn cứ chọn nhãn","label":"NHÃN"}
+"""
+
+
+SYSTEM_PROMPTS = {
+    "baseline_v1": BASELINE_SYSTEM_PROMPT,
+    "decision_first_v2": DECISION_FIRST_SYSTEM_PROMPT,
+}
+
+# Backward-compatible default used by direct unit/integration construction.
+SYSTEM_PROMPT = BASELINE_SYSTEM_PROMPT
 
 
 PRIORITY = {
@@ -43,17 +80,19 @@ def build_user_prompt(
     case: InferenceCase,
     case_evidence: list[CaseEvidence],
     law_evidence: list[LawEvidence],
+    case_evidence_chars: int = 1400,
+    law_evidence_chars: int = 1200,
 ) -> str:
     selected_cases = sorted(
         case_evidence,
         key=lambda item: (PRIORITY.get(item.query_type, 8), -item.score),
     )[:8]
     cases_text = "\n\n".join(
-        f"[{item.chunk_id} | {item.query_type}] {item.text[:1400]}"
+        f"[{item.chunk_id} | {item.query_type}] {item.text[:case_evidence_chars]}"
         for item in selected_cases
     ) or "Không truy hồi được bằng chứng vụ án."
     laws_text = "\n\n".join(
-        f"[{item.law_id} | aid={item.aid}] {item.text[:1200]}"
+        f"[{item.law_id} | aid={item.aid}] {item.text[:law_evidence_chars]}"
         for item in law_evidence[:5]
     ) or "Không truy hồi được điều luật."
     return f"""## Vụ án
@@ -159,8 +198,19 @@ class TransformersQwenBackend:
 
 
 class OutcomePredictor:
-    def __init__(self, backend: GenerationBackend):
+    def __init__(
+        self,
+        backend: GenerationBackend,
+        system_prompt: str = SYSTEM_PROMPT,
+        case_evidence_chars: int = 1400,
+        law_evidence_chars: int = 1200,
+    ):
+        if case_evidence_chars <= 0 or law_evidence_chars <= 0:
+            raise ValueError("Evidence character budgets must be positive")
         self.backend = backend
+        self.system_prompt = system_prompt
+        self.case_evidence_chars = case_evidence_chars
+        self.law_evidence_chars = law_evidence_chars
 
     def predict(
         self,
@@ -168,8 +218,14 @@ class OutcomePredictor:
         case_evidence: list[CaseEvidence],
         law_evidence: list[LawEvidence],
     ) -> tuple[OutcomeLabel, str, str]:
-        prompt = build_user_prompt(case, case_evidence, law_evidence)
-        raw = self.backend.generate(SYSTEM_PROMPT, prompt)
+        prompt = build_user_prompt(
+            case,
+            case_evidence,
+            law_evidence,
+            case_evidence_chars=self.case_evidence_chars,
+            law_evidence_chars=self.law_evidence_chars,
+        )
+        raw = self.backend.generate(self.system_prompt, prompt)
         try:
             label, reasoning = parse_prediction(raw)
             return label, reasoning, raw
@@ -179,7 +235,7 @@ class OutcomePredictor:
                 "trường reasoning và label; label phải thuộc A_WIN, PARTIAL_A_WIN, "
                 f"PARTIAL_B_WIN, B_WIN. Đầu ra lỗi:\n{raw[:1500]}"
             )
-            repaired = self.backend.generate(SYSTEM_PROMPT, repair)
+            repaired = self.backend.generate(self.system_prompt, repair)
             try:
                 label, reasoning = parse_prediction(repaired)
                 return label, reasoning, f"{raw}\n---REPAIR---\n{repaired}"
@@ -198,4 +254,12 @@ def create_predictor(config: dict) -> OutcomePredictor:
         max_new_tokens=int(config.get("max_new_tokens", 384)),
         thinking=bool(config.get("thinking", False)),
     )
-    return OutcomePredictor(backend)
+    prompt_variant = config.get("prompt_variant", "baseline_v1")
+    if prompt_variant not in SYSTEM_PROMPTS:
+        raise ValueError(f"Unsupported prediction prompt_variant: {prompt_variant}")
+    return OutcomePredictor(
+        backend,
+        system_prompt=SYSTEM_PROMPTS[prompt_variant],
+        case_evidence_chars=int(config.get("case_evidence_chars", 1400)),
+        law_evidence_chars=int(config.get("law_evidence_chars", 1200)),
+    )

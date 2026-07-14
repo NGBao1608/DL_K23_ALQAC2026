@@ -27,6 +27,7 @@ def main() -> None:
         top_k=settings["top_k"],
         rrf_k=settings["rrf_k"],
         batch_size=settings["batch_size"],
+        citation_k=settings.get("citation_k", 0),
     )
     embeddings = retriever.build_or_load_index()
     print(f"Law index ready: {embeddings.shape}")

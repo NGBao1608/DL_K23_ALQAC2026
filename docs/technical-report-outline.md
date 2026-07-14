@@ -1,45 +1,60 @@
-# Technical report outline
+# Technical Report Outline
 
-This is a source-backed outline. Do not add scores until a reproducible artifact exists.
+**Last synchronized:** 2026-07-14
 
-## 1. Task and constraints
+**Canonical references:** [`competition.md`](competition.md), [`pipeline.md`](pipeline.md), and [`experiments.md`](experiments.md)
+
+`Needs confirmation`: the refreshed official pages do not state whether a technical report or source-code package is mandatory, nor their deadlines. Prepare these artifacts for reproducibility without representing them as confirmed official deliverables.
+
+Do not add scores unless a reproducible artifact and, where applicable, an official leaderboard result exist.
+
+## 1. Task and official score
 
 - Legal Case Outcome Prediction with Evidence Retrieval.
-- Four outcome labels and official metric weights.
-- Private-test boundary, API and open-weight model restriction.
+- Four official labels.
+- Outcome Accuracy, Penalized Case Recall, and Micro Law Evidence F1.
+- Permanent cross-run Case API call accounting.
+- Official rules source and last-checked date.
 
 ## 2. Data
 
-- Public development set statistics.
-- Law corpus statistics.
-- Separation of inference fields and public gold annotations.
+- Public development set statistics and field boundary.
+- Official law corpus statistics.
+- Private-like inference using only `case_id` and `case_query`.
+- Separation of Public gold annotations from inference.
+- `Needs confirmation` items about refreshed Private Test shape and data restrictions.
 
 ## 3. System
 
-- Deterministic Case Content API query strategy.
-- BM25 + Vietnamese Embedding + RRF + Vietnamese Reranker.
-- Qwen3-8B NF4 outcome prediction and structured output validation.
-- Cache, checkpoint and staged T4 execution.
+- Deterministic Case Content API query strategy and permanent call budget.
+- Opaque case-evidence identifier handling.
+- BM25 and hybrid Vietnamese law retrieval.
+- Qwen3-8B NF4 prediction and structured output validation.
+- Cache, checkpoint, resume, and staged Kaggle T4 execution.
 
 ## 4. Experiments
 
 - BM25 baseline.
-- Hybrid retrieval ablation.
+- Hybrid retrieval and reranking comparison.
 - Outcome accuracy and law evidence metrics.
-- API efficiency and failure statistics.
+- Official Penalized Case Recall and FinalScore when available.
+- API calls/cache hits and query-budget rationale.
 
-Every table row must include config, Git revision, model revisions and run directory.
+Every result row must reference config, Git revision, model revisions, run directory, corpus hash, and verification status.
 
 ## 5. Error analysis
 
-- Confusion between full and partial wins.
-- Missing/incorrect case evidence.
-- Missing/incorrect law evidence.
-- JSON or runtime failures.
+- Confusion among full/partial plaintiff/defendant outcomes.
+- Missing or incorrect case evidence.
+- Missing or incorrect law evidence.
+- API budget inefficiency.
+- JSON, runtime, and validator failures.
 
 ## 6. Reproducibility
 
 - Environment and hardware.
-- Commands for public/private runs.
-- Source bundle contents and known limitations.
-
+- Public/private commands and notebook workflow.
+- Secret-handling policy.
+- Run artifacts and clean-kernel replay.
+- Source bundle contents and exclusions.
+- Known limitations and unresolved organizer questions.

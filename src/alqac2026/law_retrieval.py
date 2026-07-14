@@ -3,6 +3,7 @@ from __future__ import annotations
 import gc
 import json
 import re
+import unicodedata
 from pathlib import Path
 from typing import Protocol
 
@@ -10,6 +11,84 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from .schemas import LawArticle, LawEvidence
+
+
+LAW_CITATION_ALIASES = {
+    "47/2010/QH12": ("luật các tổ chức tín dụng",),
+    "66/2014/QH13": ("luật kinh doanh bất động sản",),
+    "24/2012/NĐ-CP": ("nghị định 24/2012/nđ-cp", "nghị định số 24/2012/nđ-cp"),
+    "60/2014/QH13": ("luật hộ tịch",),
+    "52/2010/QH12": ("luật nuôi con nuôi",),
+    "26/2008/QH12": ("luật thi hành án dân sự",),
+    "19/2011/NĐ-CP": ("nghị định 19/2011/nđ-cp", "nghị định số 19/2011/nđ-cp"),
+    "326/2016/UBTVQH14": (
+        "nghị quyết 326/2016/ubtvqh14",
+        "nghị quyết số 326/2016/ubtvqh14",
+        "nghị quyết số 326",
+    ),
+    "92/2015/QH13": ("bộ luật tố tụng dân sự",),
+    "39/2009/QH12": ("luật người cao tuổi",),
+    "91/2015/QH13": ("bộ luật dân sự",),
+    "52/2014/QH13": ("luật hôn nhân và gia đình",),
+    "45/2013/QH13": ("luật đất đai",),
+    "100/2015/QH13": ("bộ luật hình sự",),
+    "37/2015/NĐ-CP": ("nghị định 37/2015/nđ-cp", "nghị định số 37/2015/nđ-cp"),
+    "02/2011/QH13": ("luật khiếu nại",),
+    "93/2015/QH13": ("luật tố tụng hành chính",),
+    "50/2014/QH13": ("luật xây dựng",),
+}
+
+
+def _normalize_citation_text(text: str) -> str:
+    value = unicodedata.normalize("NFD", text.lower())
+    value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn")
+    value = value.replace("đ", "d")
+    return re.sub(r"\s+", " ", value)
+
+
+def extract_law_citations(
+    text: str,
+    articles: list[LawArticle],
+    max_citations: int = 12,
+    citation_window: int = 500,
+) -> list[tuple[str, int]]:
+    """Extract exact corpus law/article-number citations from retrieved evidence."""
+    if max_citations <= 0 or not text:
+        return []
+    available = {(article.law_id, article.article_number) for article in articles}
+    normalized = _normalize_citation_text(text)
+    mentions: list[tuple[int, int, str]] = []
+    for law_id, aliases in LAW_CITATION_ALIASES.items():
+        normalized_aliases = {
+            _normalize_citation_text(alias) for alias in (*aliases, law_id)
+        }
+        for alias in normalized_aliases:
+            expected_year = law_id.split("/")[1]
+            for match in re.finditer(re.escape(alias), normalized):
+                suffix = normalized[match.end() : match.end() + 24]
+                stated_year = re.search(r"\b(?:nam\s+)?((?:19|20)\d{2})\b", suffix)
+                if stated_year and stated_year.group(1) != expected_year:
+                    continue
+                mentions.append((match.start(), match.end(), law_id))
+    mentions.sort(key=lambda item: (item[0], -(item[1] - item[0]), item[2]))
+    non_overlapping: list[tuple[int, int, str]] = []
+    for mention in mentions:
+        if non_overlapping and mention[0] < non_overlapping[-1][1]:
+            continue
+        non_overlapping.append(mention)
+
+    citations: list[tuple[str, int]] = []
+    previous_end = 0
+    for start, end, law_id in non_overlapping:
+        segment = normalized[max(previous_end, start - citation_window) : start]
+        for value in re.findall(r"\bdieu\s+(\d+)", segment):
+            key = (law_id, int(value))
+            if key in available and key not in citations:
+                citations.append(key)
+                if len(citations) >= max_citations:
+                    return citations
+        previous_end = end
+    return citations
 
 
 def tokenize_vietnamese(text: str) -> list[str]:
@@ -78,6 +157,7 @@ class HybridLawRetriever:
         top_k: int = 5,
         rrf_k: int = 60,
         batch_size: int = 16,
+        citation_k: int = 0,
     ):
         self.articles = articles
         self.embedding_model_name = embedding_model
@@ -91,7 +171,12 @@ class HybridLawRetriever:
         self.top_k = top_k
         self.rrf_k = rrf_k
         self.batch_size = batch_size
+        self.citation_k = citation_k
         self.bm25 = BM25LawRetriever(articles)
+        self._article_index_by_citation = {
+            (article.law_id, article.article_number): index
+            for index, article in enumerate(articles)
+        }
         self._embedding_model = None
         self._reranker = None
         self._embeddings: np.ndarray | None = None
@@ -169,10 +254,20 @@ class HybridLawRetriever:
             [[index for index, _ in sparse], [index for index, _ in dense]],
             rrf_k=self.rrf_k,
         )[: self.candidate_k]
-        indices = [index for index, _ in fused]
+        citation_indices = [
+            self._article_index_by_citation[key]
+            for key in extract_law_citations(
+                query, self.articles, max_citations=self.citation_k
+            )
+        ]
+        indices = list(
+            dict.fromkeys(citation_indices + [index for index, _ in fused])
+        )
         reranker = self._load_reranker()
         pairs = [(query, self.articles[index].text) for index in indices]
-        scores = reranker.predict(pairs, batch_size=self.batch_size, show_progress_bar=False)
+        scores = reranker.predict(
+            pairs, batch_size=self.batch_size, show_progress_bar=False
+        )
         ranked = sorted(
             zip(indices, np.asarray(scores).reshape(-1).tolist()),
             key=lambda item: -item[1],
@@ -212,4 +307,5 @@ def create_law_retriever(
         top_k=int(config["top_k"]),
         rrf_k=int(config["rrf_k"]),
         batch_size=int(config.get("batch_size", 16)),
+        citation_k=int(config.get("citation_k", 0)),
     )

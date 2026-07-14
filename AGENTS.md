@@ -1,63 +1,60 @@
-# ALQAC 2026 Engineering Rules
+# ALQAC 2026 Agent Rules
 
-## Communication
+## Communication and language
 
 - Communicate with the user in Vietnamese.
-- Keep code identifiers, commands, schemas, and metric names in English.
+- Write repository documentation, plans, code comments, module descriptions, API notes, submission rules, and experiment logs in English.
+- Preserve official field names, labels, filenames, API names, and important Vietnamese legal phrases exactly.
 
 ## Sources of truth
 
-Use this priority order: official organizer material, official raw data, tracked code/configuration, reproducible run artifacts, then README/notebook notes. Report conflicts instead of guessing.
+Use this order: current official organizer pages, organizer-provided raw data, tracked code/configuration, reproducible run artifacts, then repository notes. Report conflicts as `Needs confirmation`; never guess.
+
+Read only the relevant canonical documents:
+
+- `docs/competition.md` — official requirements and open questions.
+- `docs/data_api.md` — data/API contract, token, rate limit, and call accounting.
+- `docs/submission.md` — schema and validation checklist.
+- `docs/pipeline.md` — current implementation.
+- `docs/plan.md` — priorities and status.
+- `docs/experiments.md` and `docs/decisions.md` — evidence and team decisions.
 
 ## Data boundary
 
 - Production inference may consume only `case_id` and `case_query`.
-- Public-only gold fields may be read only by evaluation and error-analysis code.
+- Public-only gold fields may be read only by evaluation/error-analysis code.
 - Never use `verdict_label`, `case_fact`, `judgment_text`, `court_reasoning`, `court_verdict`, or `related_law_provisions` as inference features.
-- Public evaluation must build private-like inputs before calling the inference pipeline.
 
-## Competition constraints
+## API and submission safety
 
-- Use only open-weight models with fewer than 10 billion parameters.
-- Do not use proprietary model APIs in the competition pipeline.
-- Respect the official Case Content API rate limit.
-- Do not upload leaderboard submissions automatically.
+- Case Content API calls accumulate across every team run and affect official scoring. Prefer cache/checkpoint reuse and do not make exploratory real calls without a reviewed budget.
+- Production baseline/candidate runs use exactly two deterministic queries per case: `court_decision` and normalized `case_query`. Queries 3–8 require separate budget approval.
+- Every non-mock run requires API preflight, an explicit hard network-attempt cap, and the shared external SQLite cache.
+- Treat `chunk_id` as opaque and preserve the exact API value; never construct or validate a guessed prefix.
+- Read tokens only from environment or approved secret storage. Never hardcode, print, log, commit, or serialize secrets.
+- Never modify raw official data.
+- Never upload a leaderboard submission automatically.
+- Do not upload mock, partial, failed, or unvalidated output.
 
-## Locked implementation stack
-
-- Outcome model: `Qwen/Qwen3-8B`, pinned revision, NF4 4-bit, FP16 compute, thinking disabled.
-- Law retrieval candidate: BM25 top 50 + `AITeamVN/Vietnamese_Embedding` top 50 + RRF top 30 + `AITeamVN/Vietnamese_Reranker` top 5.
-- Case evidence: at most eight deterministic queries through the official Case Content API.
-- Production runtime: Kaggle T4; local CPU is only for tests, validation, and BM25/mock runs.
-- `configs/baseline.yaml` is CPU/mock verified for plumbing and BM25 retrieval only; its Qwen/API path is not yet GPU/API verified.
-- `configs/candidate.yaml` is the hybrid candidate. Do not create or call a configuration `final` until a clean full public run and comparison support promotion.
-
-## Security
-
-- Read the team token from environment or notebook secret storage.
-- Never hard-code or print the token.
-- Do not commit `.env`, private test data, caches, model weights, logs, or submission artifacts.
-
-## Working method
+## Working rules
 
 - Inspect `git status` before editing and preserve unrelated user changes.
-- Keep notebooks thin; reusable behavior belongs in `src/alqac2026`.
-- Add tests for data boundaries, identifiers, cache behavior, parsers, and submission validation.
-- Report separately what was statically checked, locally tested, and not run because GPU/API access was unavailable.
-- Do not commit, push, or submit unless the user explicitly requests it.
+- Do not modify source code when the task requests only documentation or analysis.
+- Keep notebooks thin; reusable logic belongs in `src/alqac2026`.
+- Do not commit, push, submit, or change external state unless explicitly requested.
+- Keep changes small, consistent, reviewable, and easy to revert.
 
-## Verification language
+Use these verification statuses exactly:
 
-Use exactly these status categories in reports:
+- `implemented`;
+- `CPU/mock verified`;
+- `GPU/API verified`;
+- `leaderboard verified`; and
+- `Not implemented yet`.
 
-- `implemented`: code exists but may not have run in the target environment.
-- `CPU/mock verified`: covered by local tests or mock execution only.
-- `GPU/API verified`: executed successfully with the pinned models and official API.
-- `leaderboard verified`: confirmed by an official leaderboard result.
+Never promote a status without reproducible evidence.
 
-Never promote an earlier category to a later one without reproducible evidence.
-
-## Required checks
+## Required code checks
 
 Before claiming a code change complete, run:
 
@@ -71,4 +68,13 @@ python scripts/run_public.py --mock --limit 2 \
 python scripts/package_source.py
 ```
 
-Before a full public/private GPU run, first run exactly two cases in a new run directory. Never resume a mock or limited run as a full production run.
+Before a full Public or Private GPU run, run exactly two cases in a new run directory. Never resume a mock or limited run as a full production run.
+
+## Definition of done
+
+- Requested files are updated and cross-references are consistent.
+- Official requirements, team implementation, and open questions are separated.
+- Uncertain claims are marked `Needs confirmation`.
+- No secrets or raw-data modifications are present.
+- Relevant checks pass.
+- The final user report is in Vietnamese and states changes, verification, remaining uncertainty, and next priorities.

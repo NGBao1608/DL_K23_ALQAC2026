@@ -12,10 +12,10 @@ paths:
 
 case_retrieval:
   api_base: https://alqac-api.ngrok.pro
-  max_queries: 8
+  max_queries: 2
   request_interval_seconds: 5.0
   timeout_seconds: 30
-  retries: 4
+  retries: 2
 
 law_retrieval:
   strategy: bm25_only
@@ -29,6 +29,7 @@ law_retrieval:
   top_k: 5
   rrf_k: 60
   batch_size: 16
+  citation_k: 0
 
 prediction:
   model_name: Qwen/Qwen3-8B
@@ -37,3 +38,6 @@ prediction:
   max_input_tokens: 7000
   max_new_tokens: 384
   thinking: false
+  prompt_variant: baseline_v1
+  case_evidence_chars: 1400
+  law_evidence_chars: 1200

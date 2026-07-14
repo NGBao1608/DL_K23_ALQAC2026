@@ -58,3 +58,26 @@ def test_failure_always_writes_manifest(tmp_path, monkeypatch):
     assert "forced failure" in manifest["run"]["error"]
     assert (run_dir / "environment.json").exists()
     assert (run_dir / "api_stats.json").exists()
+
+
+def test_non_mock_run_requires_explicit_api_budget():
+    with pytest.raises(ValueError, match="explicit max_network_calls"):
+        runner.run_experiment("configs/baseline.yaml", "input.json", mock=False)
+
+
+def test_cache_override_is_recorded_in_resolved_config(tmp_path, monkeypatch):
+    _patch_small_run(monkeypatch)
+    run_dir = tmp_path / "run"
+    cache_path = tmp_path / "external" / "case_api.sqlite"
+    runner.run_experiment(
+        "configs/baseline.yaml",
+        "input.json",
+        resume_run=run_dir,
+        mock=True,
+        limit=1,
+        cache_db=cache_path,
+    )
+    resolved = json.loads(
+        (run_dir / "config.resolved.json").read_text(encoding="utf-8")
+    )
+    assert resolved["config"]["paths"]["cache_db"] == str(cache_path)

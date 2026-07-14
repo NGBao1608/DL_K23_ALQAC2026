@@ -7,6 +7,7 @@ from .schemas import InferenceCase, LawArticle, OutcomeLabel, PredictionResult
 
 
 SUBMISSION_FIELDS = {"case_id", "prediction", "case_evidence", "law_evidence"}
+MAX_SUBMISSION_BYTES = 10 * 1024 * 1024
 
 
 def build_submission(results: list[PredictionResult]) -> list[dict]:
@@ -46,7 +47,11 @@ def validate_submission(
 ) -> dict[str, int | str]:
     errors: list[str] = []
     expected_ids = {case.case_id for case in cases}
-    submitted_ids = [str(item.get("case_id", "")) for item in submission]
+    submitted_ids = [
+        item.get("case_id")
+        for item in submission
+        if isinstance(item, dict) and isinstance(item.get("case_id"), str)
+    ]
     if len(submitted_ids) != len(set(submitted_ids)):
         errors.append("Duplicate case_id")
     missing = expected_ids - set(submitted_ids)
@@ -59,24 +64,28 @@ def validate_submission(
     valid_laws = {(article.law_id, article.aid) for article in corpus}
 
     for index, item in enumerate(submission):
+        if not isinstance(item, dict):
+            errors.append(f"Item {index} must be a JSON object")
+            continue
         if set(item) != SUBMISSION_FIELDS:
             errors.append(f"Item {index} has invalid fields: {sorted(set(item))}")
             continue
-        case_id = str(item["case_id"])
+        if not isinstance(item["case_id"], str) or not item["case_id"].strip():
+            errors.append(f"Item {index} has invalid case_id")
+            continue
+        case_id = item["case_id"]
         if item["prediction"] not in valid_labels:
             errors.append(f"Invalid label for {case_id}")
         if not isinstance(item["case_evidence"], list) or not all(
-            isinstance(value, str) for value in item["case_evidence"]
+            isinstance(value, str) and bool(value.strip())
+            for value in item["case_evidence"]
         ):
-            errors.append(f"case_evidence must be list[str] for {case_id}")
+            errors.append(
+                f"case_evidence must contain only non-empty strings for {case_id}"
+            )
         else:
             if len(item["case_evidence"]) != len(set(item["case_evidence"])):
                 errors.append(f"Duplicate case evidence for {case_id}")
-            if any(
-                not chunk.startswith(f"{case_id}_chunk_")
-                for chunk in item["case_evidence"]
-            ):
-                errors.append(f"Invalid chunk prefix for {case_id}")
         if not isinstance(item["law_evidence"], list):
             errors.append(f"law_evidence must be a list for {case_id}")
         else:
@@ -85,7 +94,15 @@ def validate_submission(
                 if not isinstance(law, dict) or set(law) != {"law_id", "aid"}:
                     errors.append(f"Invalid law evidence shape for {case_id}")
                     continue
-                pair = (str(law["law_id"]), law["aid"])
+                if (
+                    not isinstance(law["law_id"], str)
+                    or not law["law_id"].strip()
+                    or not isinstance(law["aid"], int)
+                    or isinstance(law["aid"], bool)
+                ):
+                    errors.append(f"Invalid law evidence types for {case_id}")
+                    continue
+                pair = (law["law_id"], law["aid"])
                 pairs.append(pair)
                 if pair not in valid_laws:
                     errors.append(f"Unknown law evidence {pair} for {case_id}")
@@ -101,8 +118,10 @@ def validate_submission(
 
 
 def load_submission(path: str | Path) -> list[dict]:
-    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    source = Path(path)
+    if source.stat().st_size > MAX_SUBMISSION_BYTES:
+        raise ValueError("Submission exceeds the official 10 MB size limit")
+    value = json.loads(source.read_text(encoding="utf-8"))
     if not isinstance(value, list):
         raise ValueError("Submission root must be a JSON array")
     return value
-

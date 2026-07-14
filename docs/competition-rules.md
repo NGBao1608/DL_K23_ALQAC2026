@@ -1,69 +1,106 @@
-# Competition rules used by the implementation
+# Competition Rules — Synchronized Legacy View
 
-Nguồn chính: [ALQAC 2026 official website](https://sites.google.com/view/alqac2026) và thông báo BTC gửi cho đội. Khi các nguồn mâu thuẫn, xác nhận trực tiếp từ BTC được ưu tiên và tài liệu này phải được cập nhật.
+**Last synchronized:** 2026-07-14
+
+**Canonical source:** [`competition.md`](competition.md)
+
+This filename is retained for existing links and older workflows. The canonical document remains `competition.md`; update that file first whenever organizer requirements change.
 
 ## Task
 
-Input của mỗi case:
+ALQAC 2026 uses **Legal Case Outcome Prediction with Evidence Retrieval**. For each short Vietnamese case query, the system predicts one exact outcome label and submits supporting case and law evidence.
 
-```json
-{"case_id":"case_4101","case_query":"Mô tả ngắn tranh chấp..."}
-```
+Valid labels:
 
-Private test không cung cấp nội dung bản án hoặc gold annotations. Nội dung vụ án phải được truy hồi qua Case Content API.
+- `A_WIN` — Plaintiff wins.
+- `PARTIAL_A_WIN` — Plaintiff partially wins.
+- `B_WIN` — Defendant wins.
+- `PARTIAL_B_WIN` — Defendant partially wins.
 
-Prediction labels:
+`Needs confirmation`: the refreshed official pages do not define partial outcomes using the older numeric percentage interpretation.
 
-- `A_WIN`: chấp nhận toàn bộ main claim của nguyên đơn.
-- `PARTIAL_A_WIN`: chấp nhận một phần lớn hơn 50%.
-- `PARTIAL_B_WIN`: chấp nhận một phần không quá 50%.
-- `B_WIN`: bác toàn bộ main claim.
-
-Nếu case có nhiều yêu cầu, prediction tập trung vào main claim được mô tả trong `case_query`.
-
-## Resources and API
-
-- Public development set: 50 labeled cases do BTC cung cấp.
-- Private test: chỉ `case_id` và `case_query`.
-- Law corpus: 18 legal documents, 3.352 articles; submission định danh provision bằng `law_id` và `aid`.
-- Case API: `POST https://alqac-api.ngrok.pro/retrieve` với header `X-API-Key` và body `{"query":"...","case_id":"..."}`.
-- Mỗi call trả top-1 segment; rate limit là một request mỗi 5 giây/team.
-
-## Evaluation
-
-Official score gồm:
+## Score
 
 ```text
-0.70 × Outcome Accuracy
-+ 0.20 × Penalized Case Evidence Recall
-+ 0.10 × Micro Law Evidence F1
+FinalScore = 0.70 × OutcomeAccuracy
+           + 0.20 × PenalizedCaseRecall
+           + 0.10 × LawF1_micro
 ```
 
-Case evidence recall bị phạt theo API efficiency: full efficiency đến `2n` calls và giảm về 0 tại `5n`, với `n` là số segment của case. Code không tự suy đoán phần công thức chi tiết chưa được BTC cung cấp dưới dạng executable.
+For case `i`:
+
+```text
+E_i = max(0, 1 − max(0, c_i − 2·n_i) / (3·n_i))
+```
+
+Case Content API calls receive full efficiency through `2·n_i` calls and decay to zero at `5·n_i`. The organizer obtains `c_i` from append-only server logs.
+
+Critical rule: calls accumulate across every Public and Private run and are never reset. Real API experiments must use a reviewed team budget and reuse cached successful responses.
 
 ## Submission
 
-Nộp một JSON array, mỗi test case đúng một object gồm:
+Upload one `submission.json` containing one object per test case with exactly:
 
-- `case_id`.
-- `prediction`.
-- `case_evidence`: danh sách official `chunk_id`, có thể rỗng.
-- `law_evidence`: danh sách `{law_id, aid}` hợp lệ.
+```json
+{
+  "case_id": "case_4101",
+  "prediction": "A_WIN",
+  "case_evidence": ["opaque_identifier_returned_by_the_api"],
+  "law_evidence": [
+    {
+      "law_id": "47/2010/QH12",
+      "aid": 270
+    }
+  ]
+}
+```
 
-Không có duplicate/missing/unknown case ID hoặc evidence identifier. Upload leaderboard được thực hiện thủ công, tối đa ba submissions/ngày/team.
+- `case_evidence` is required and may be empty.
+- `law_evidence` uses corpus-valid `{law_id, aid}` pairs.
+- Every test case appears exactly once.
+- Upload size is at most 10 MB.
+- The public leaderboard shows the best run per team.
+- The current limit is 20 submissions per team per 24 hours.
+- Upload is always manual.
 
-## Restrictions
+## Evidence identifiers
 
-- Chỉ dùng open-weight model dưới 10B parameters.
-- Không dùng ChatGPT/GPT, Claude, Gemini hoặc proprietary model APIs trong pipeline.
-- Không dùng externally annotated datasets được tạo riêng cho legal QA/legal entailment.
-- Online legal databases có thể được truy vấn theo quy định BTC, nhưng evidence nộp phải dùng identifiers chính thức.
-- BTC có thể yêu cầu source code, config và logs để kiểm tra reproducibility.
+The leaderboard announcement says `chunk_id` is now an opaque hashed identifier that remains stable across runs. Other current official pages still show sequential `_chunk_N` examples.
 
-## Project enforcement
+`Needs confirmation`: the exact accepted naming shape is inconsistent across official pages. Always preserve the exact API-returned string; never construct or validate a guessed prefix.
 
-- Inference schema chỉ có `case_id` và `case_query`.
-- Token chỉ đọc từ environment/Kaggle/Colab Secrets.
-- Source code không tự upload submission.
-- Validator từ chối field thừa như `api_calls`, failed predictions và law identifiers không có trong corpus.
+## Data and API
 
+- Public data in the repository: 50 labeled cases.
+- Law corpus: 18 documents and 3,352 articles.
+- Case API: `POST https://alqac-api.ngrok.pro/retrieve`.
+- Authentication: `X-API-Key` with the organizer-issued team token.
+- Request: `{query, case_id}`.
+- Successful response: one top-ranked `{score, text, chunk_id}` result.
+- Rate limit: one request every five seconds per team.
+
+Production inference in this repository consumes only `case_id` and `case_query`; Public gold fields are evaluator-only.
+
+## Timeline and restrictions
+
+The official ALQAC landing page lists paper submission on 2026-07-15, notification on 2026-08-31, camera-ready on 2026-09-10, and the conference on 2026-11-11 through 2026-11-14.
+
+These are not assumed to be Public/Private Test or leaderboard deadlines.
+
+`Needs confirmation`:
+
+- Public/Private Test and leaderboard deadlines;
+- refreshed Private Test schema;
+- model-size, licensing, and proprietary-API restrictions;
+- external-data restrictions;
+- mandatory source-code delivery; and
+- mandatory technical-report delivery.
+
+## Team safeguards
+
+- Use only `case_id` and `case_query` for inference.
+- Keep secrets in environment or approved secret storage.
+- Cache successful API responses and resume checkpoints.
+- Validate every candidate submission.
+- Never upload automatically.
+- Use only evidence-backed verification statuses from `AGENTS.md`.

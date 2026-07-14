@@ -24,7 +24,11 @@ def selected_files(root: Path):
             continue
         relative = path.relative_to(root)
         if relative.as_posix() in ROOT_FILES or relative.parts[0] in SOURCE_DIRS:
-            if "__pycache__" not in relative.parts and not path.name.endswith(".pyc"):
+            if (
+                "__pycache__" not in relative.parts
+                and not any(part.endswith(".egg-info") for part in relative.parts)
+                and not path.name.endswith(".pyc")
+            ):
                 yield path, relative
 
 
