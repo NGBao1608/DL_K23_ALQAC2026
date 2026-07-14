@@ -61,6 +61,8 @@ Important retrieval phrases include “chấp nhận yêu cầu khởi kiện”
 
 Every non-mock run requires an explicit `max_network_calls` value. Preflight counts logical queries, cache hits, and cache misses without contacting the official API. A SQLite ledger records safe metadata for every local HTTP attempt, including failed retries and timeouts.
 
+During a non-mock run, `ALQAC_PROGRESS` records safe per-request Case Content API lifecycle events (`request_started`, `request_completed`, `http_error`, `request_exception`, `retry_scheduled`, and `cache_hit`). This distinguishes API waiting/retry time from hybrid retrieval or Qwen inference without exposing query text, response text, headers, or secrets.
+
 Status: cache, retry, two-query policy, preflight, budget guard, and ledger are `CPU/mock verified`; a clean run against the refreshed official API is not yet recorded as `GPU/API verified`.
 
 Because API calls accumulate permanently across runs, broad query experimentation is prohibited without a reviewed call budget.

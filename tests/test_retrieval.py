@@ -132,6 +132,45 @@ def test_api_retry_then_cache_hit(tmp_path):
     cache.close()
 
 
+def test_api_progress_events_are_safe_and_cover_retry_and_cache_hit(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    events = []
+    client = CaseContentClient(
+        token="secret-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=2,
+        request_interval_seconds=0,
+        session=FakeSession(
+            [
+                FakeResponse(503, {}),
+                FakeResponse(200, {"results": []}),
+            ]
+        ),
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+        progress_callback=events.append,
+    )
+
+    client.retrieve("case_1", "sensitive query", query_type="original")
+    client.retrieve("case_1", "sensitive query", query_type="original")
+
+    assert [event["status"] for event in events] == [
+        "request_started",
+        "http_error",
+        "retry_scheduled",
+        "request_started",
+        "request_completed",
+        "cache_hit",
+    ]
+    assert events[0]["timeout_seconds"] == 30
+    assert events[1]["status_code"] == 503
+    assert events[-1]["result_count"] == 0
+    assert all("query" not in event for event in events)
+    assert all("secret-token" not in str(event) for event in events)
+    cache.close()
+
+
 def test_api_strips_secret_and_redacts_403_diagnostics(tmp_path):
     cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
     session = FakeSession(

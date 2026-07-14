@@ -140,6 +140,20 @@ def run_experiment(
     write_json(run_dir / "manifest.json", manifest)
     write_json(run_dir / "environment.json", build_environment())
     case_positions = {case.case_id: index for index, case in enumerate(cases, start=1)}
+    cases_by_id = {case.case_id: case for case in cases}
+
+    def emit_case_api_progress(event: dict[str, object]) -> None:
+        payload = dict(event)
+        case_id = str(payload.pop("case_id"))
+        _emit_progress(
+            stage="case_api",
+            status=str(payload.pop("status")),
+            case=cases_by_id[case_id],
+            index=case_positions[case_id],
+            total=len(cases),
+            **payload,
+        )
+
     _emit_progress(
         stage="run",
         status="started",
@@ -244,6 +258,7 @@ def run_experiment(
                     retries=int(config["case_retrieval"]["retries"]),
                     max_network_calls=max_network_calls,
                     run_key=run_key,
+                    progress_callback=emit_case_api_progress,
                 )
                 case_retriever = CaseEvidenceRetriever(
                     client,

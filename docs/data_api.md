@@ -145,6 +145,7 @@ Team rules:
 - SQLite stores successful evidence responses and a safe attempt ledger containing query hashes rather than query text or credentials.
 - API responses are checkpointed into prepared contexts for resume.
 - `chunk_id` is stored as a string and can carry opaque hashed values.
+- During a non-mock run, the runner emits safe `ALQAC_PROGRESS` events for cache hits, HTTP request start/completion, HTTP errors, exceptions, and scheduled retries. Events include only `case_id`, query type, attempt metadata, status metadata, and latency; they never include the query text, response text, headers, or token.
 
 ## Verification status
 

@@ -226,6 +226,7 @@ class CaseContentClient:
         session: requests.Session | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        progress_callback: Callable[[dict[str, object]], None] | None = None,
     ):
         token = token.strip()
         if not token:
@@ -243,6 +244,7 @@ class CaseContentClient:
         self.session = session or requests.Session()
         self.sleep = sleep
         self.clock = clock
+        self.progress_callback = progress_callback
         self._last_call = 0.0
         existing_stats = self.cache.run_attempt_stats(run_key)
         self.network_calls = int(existing_stats["network_attempts"])
@@ -251,6 +253,15 @@ class CaseContentClient:
         self.per_case_attempts: dict[str, int] = defaultdict(int)
         self.per_case_successes: dict[str, int] = defaultdict(int)
         self.per_case_cache_hits: dict[str, int] = defaultdict(int)
+
+    def _emit_progress(self, **event: object) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(event)
+        except Exception:
+            # Observability must never interrupt a budgeted retrieval request.
+            return
 
     def _throttle(self) -> None:
         remaining = self.request_interval_seconds - (self.clock() - self._last_call)
@@ -276,6 +287,12 @@ class CaseContentClient:
         if cached is not None:
             self.cache_hits += 1
             self.per_case_cache_hits[case_id] += 1
+            self._emit_progress(
+                status="cache_hit",
+                case_id=case_id,
+                query_type=query_type,
+                result_count=len(cached),
+            )
             return cached
 
         payload = {"case_id": case_id, "query": query}
@@ -289,6 +306,17 @@ class CaseContentClient:
         for attempt in range(self.retries):
             self._throttle()
             self._claim_network_budget(case_id)
+            network_attempt = self.network_calls
+            self._emit_progress(
+                status="request_started",
+                case_id=case_id,
+                query_type=query_type,
+                logical_attempt=attempt + 1,
+                network_attempt=network_attempt,
+                max_network_calls=self.max_network_calls,
+                timeout_seconds=self.timeout_seconds,
+            )
+            request_started = time.perf_counter()
             try:
                 response = self.session.post(
                     f"{self.base_url}/retrieve",
@@ -297,6 +325,7 @@ class CaseContentClient:
                     timeout=self.timeout_seconds,
                 )
             except requests.RequestException as error:
+                latency_seconds = round(time.perf_counter() - request_started, 3)
                 self._last_call = self.clock()
                 self.cache.log_attempt(
                     case_id,
@@ -305,11 +334,30 @@ class CaseContentClient:
                     run_key=self.run_key,
                     exception_type=type(error).__name__,
                 )
+                self._emit_progress(
+                    status="request_exception",
+                    case_id=case_id,
+                    query_type=query_type,
+                    logical_attempt=attempt + 1,
+                    network_attempt=network_attempt,
+                    exception_type=type(error).__name__,
+                    latency_seconds=latency_seconds,
+                )
                 if attempt + 1 < self.retries:
-                    self.sleep(self.request_interval_seconds * (2**attempt))
+                    retry_delay_seconds = self.request_interval_seconds * (2**attempt)
+                    self._emit_progress(
+                        status="retry_scheduled",
+                        case_id=case_id,
+                        query_type=query_type,
+                        logical_attempt=attempt + 1,
+                        next_logical_attempt=attempt + 2,
+                        retry_delay_seconds=retry_delay_seconds,
+                    )
+                    self.sleep(retry_delay_seconds)
                     continue
                 raise
             self._last_call = self.clock()
+            latency_seconds = round(time.perf_counter() - request_started, 3)
             if response.status_code == 200:
                 try:
                     payload_value = response.json()
@@ -337,6 +385,16 @@ class CaseContentClient:
                         status_code=response.status_code,
                         exception_type=type(error).__name__,
                     )
+                    self._emit_progress(
+                        status="invalid_response",
+                        case_id=case_id,
+                        query_type=query_type,
+                        logical_attempt=attempt + 1,
+                        network_attempt=network_attempt,
+                        status_code=response.status_code,
+                        exception_type=type(error).__name__,
+                        latency_seconds=latency_seconds,
+                    )
                     raise
                 self.cache.log_attempt(
                     case_id,
@@ -349,6 +407,16 @@ class CaseContentClient:
                 self.successful_calls += 1
                 self.per_case_successes[case_id] += 1
                 self.cache.put(case_id, query, results)
+                self._emit_progress(
+                    status="request_completed",
+                    case_id=case_id,
+                    query_type=query_type,
+                    logical_attempt=attempt + 1,
+                    network_attempt=network_attempt,
+                    status_code=response.status_code,
+                    result_count=len(results),
+                    latency_seconds=latency_seconds,
+                )
                 return results
             self.cache.log_attempt(
                 case_id,
@@ -356,6 +424,15 @@ class CaseContentClient:
                 query_type,
                 run_key=self.run_key,
                 status_code=response.status_code,
+            )
+            self._emit_progress(
+                status="http_error",
+                case_id=case_id,
+                query_type=query_type,
+                logical_attempt=attempt + 1,
+                network_attempt=network_attempt,
+                status_code=response.status_code,
+                latency_seconds=latency_seconds,
             )
             if response.status_code == 403:
                 content_type = response.headers.get("Content-Type", "unknown")
@@ -377,7 +454,16 @@ class CaseContentClient:
                 raise ValueError(f"Malformed Case API request: {payload}")
             if response.status_code == 429 or 500 <= response.status_code < 600:
                 if attempt + 1 < self.retries:
-                    self.sleep(self.request_interval_seconds * (2**attempt))
+                    retry_delay_seconds = self.request_interval_seconds * (2**attempt)
+                    self._emit_progress(
+                        status="retry_scheduled",
+                        case_id=case_id,
+                        query_type=query_type,
+                        logical_attempt=attempt + 1,
+                        next_logical_attempt=attempt + 2,
+                        retry_delay_seconds=retry_delay_seconds,
+                    )
+                    self.sleep(retry_delay_seconds)
                     continue
             response.raise_for_status()
         raise RuntimeError(f"Case API failed after {self.retries} attempts: {case_id}")
