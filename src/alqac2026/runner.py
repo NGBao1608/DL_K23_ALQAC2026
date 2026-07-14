@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,38 @@ from .pipeline import ALQACPipeline, CheckpointStore, PreparedCaseStore
 from .prediction import OutcomePredictor, create_predictor
 from .schemas import InferenceCase
 from .submission import build_submission, validate_submission
+
+
+PROGRESS_PREFIX = "ALQAC_PROGRESS "
+
+
+def _emit_progress(
+    *,
+    stage: str,
+    status: str,
+    case: InferenceCase | None = None,
+    index: int | None = None,
+    total: int | None = None,
+    **details,
+) -> None:
+    """Emit one safe, machine-readable progress event to stdout."""
+    payload = {
+        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "stage": stage,
+        "status": status,
+    }
+    if case is not None:
+        payload["case_id"] = case.case_id
+    if index is not None:
+        payload["index"] = index
+    if total is not None:
+        payload["total"] = total
+    payload.update(details)
+    print(
+        PROGRESS_PREFIX
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        flush=True,
+    )
 
 
 class EmptyCaseRetriever:
@@ -106,6 +139,14 @@ def run_experiment(
     }
     write_json(run_dir / "manifest.json", manifest)
     write_json(run_dir / "environment.json", build_environment())
+    case_positions = {case.case_id: index for index, case in enumerate(cases, start=1)}
+    _emit_progress(
+        stage="run",
+        status="started",
+        total=len(cases),
+        run_name=config["run"]["name"],
+        mock=mock,
+    )
     cache = None
     client = None
     checkpoint = CheckpointStore(run_dir / "predictions.checkpoint.json")
@@ -117,6 +158,20 @@ def run_experiment(
             existing = checkpoint.get(case.case_id)
             if existing is not None and existing.status == "completed":
                 results_by_id[case.case_id] = existing
+                _emit_progress(
+                    stage="prediction",
+                    status="resumed",
+                    case=case,
+                    index=case_positions[case.case_id],
+                    total=len(cases),
+                    prediction=(
+                        existing.prediction.value if existing.prediction else None
+                    ),
+                    case_evidence_count=len(existing.case_evidence),
+                    law_evidence_count=len(existing.law_evidence),
+                    api_calls=existing.api_calls,
+                    latency_seconds=round(existing.latency_seconds, 3),
+                )
             else:
                 pending_cases.append(case)
 
@@ -128,6 +183,16 @@ def run_experiment(
                 to_prepare.append(case)
             else:
                 prepared_by_id[case.case_id] = prepared
+                _emit_progress(
+                    stage="preparation",
+                    status="resumed",
+                    case=case,
+                    index=case_positions[case.case_id],
+                    total=len(cases),
+                    case_evidence_count=len(prepared.case_evidence),
+                    law_evidence_count=len(prepared.law_evidence),
+                    api_calls=prepared.api_calls,
+                )
 
         if not mock:
             cache = SQLiteEvidenceCache(config["paths"]["cache_db"])
@@ -189,11 +254,47 @@ def run_experiment(
                 case_retriever, law_retriever, predictor=None
             )
             for case in to_prepare:
-                prepared = preparation_pipeline.prepare_case(
-                    case, law_top_k=int(config["law_retrieval"]["top_k"])
+                position = case_positions[case.case_id]
+                _emit_progress(
+                    stage="preparation",
+                    status="started",
+                    case=case,
+                    index=position,
+                    total=len(cases),
                 )
+                preparation_started = time.perf_counter()
+                try:
+                    prepared = preparation_pipeline.prepare_case(
+                        case, law_top_k=int(config["law_retrieval"]["top_k"])
+                    )
+                except Exception as error:
+                    _emit_progress(
+                        stage="preparation",
+                        status="failed",
+                        case=case,
+                        index=position,
+                        total=len(cases),
+                        error_type=type(error).__name__,
+                        latency_seconds=round(
+                            time.perf_counter() - preparation_started, 3
+                        ),
+                    )
+                    raise
                 prepared_store.put(prepared)
                 prepared_by_id[case.case_id] = prepared
+                _emit_progress(
+                    stage="preparation",
+                    status="completed",
+                    case=case,
+                    index=position,
+                    total=len(cases),
+                    case_evidence_count=len(prepared.case_evidence),
+                    law_evidence_count=len(prepared.law_evidence),
+                    api_calls=prepared.api_calls,
+                    latency_seconds=round(
+                        time.perf_counter() - preparation_started, 3
+                    ),
+                )
             if hasattr(law_retriever, "release_gpu_models"):
                 law_retriever.release_gpu_models()
 
@@ -205,9 +306,36 @@ def run_experiment(
             )
             prediction_pipeline = ALQACPipeline(None, None, predictor)
             for case in pending_cases:
+                position = case_positions[case.case_id]
+                _emit_progress(
+                    stage="prediction",
+                    status="started",
+                    case=case,
+                    index=position,
+                    total=len(cases),
+                )
                 result = prediction_pipeline.predict_prepared(prepared_by_id[case.case_id])
                 checkpoint.put(result)
                 results_by_id[case.case_id] = result
+                progress_details = {
+                    "prediction": (
+                        result.prediction.value if result.prediction else None
+                    ),
+                    "case_evidence_count": len(result.case_evidence),
+                    "law_evidence_count": len(result.law_evidence),
+                    "api_calls": result.api_calls,
+                    "latency_seconds": round(result.latency_seconds, 3),
+                }
+                if result.error:
+                    progress_details["error_type"] = result.error.split(":", 1)[0]
+                _emit_progress(
+                    stage="prediction",
+                    status=result.status,
+                    case=case,
+                    index=position,
+                    total=len(cases),
+                    **progress_details,
+                )
 
         results = [results_by_id[case.case_id] for case in cases]
         write_json(
@@ -243,6 +371,14 @@ def run_experiment(
             _api_stats(cases, client, cache, run_key, max_network_calls),
         )
         write_json(run_dir / "manifest.json", manifest)
+        _emit_progress(
+            stage="run",
+            status="completed",
+            total=len(cases),
+            completed=manifest["run"]["completed"],
+            validation_status=validation["status"],
+            network_attempts=run_network_attempts,
+        )
         return {
             "run_dir": str(run_dir),
             "validation": validation,
@@ -270,6 +406,14 @@ def run_experiment(
             _api_stats(cases, client, cache, run_key, max_network_calls),
         )
         write_json(run_dir / "manifest.json", manifest)
+        _emit_progress(
+            stage="run",
+            status="failed",
+            total=len(cases),
+            completed=manifest["run"]["completed"],
+            error_type=type(error).__name__,
+            network_attempts=run_network_attempts,
+        )
         raise
     finally:
         if cache is not None:

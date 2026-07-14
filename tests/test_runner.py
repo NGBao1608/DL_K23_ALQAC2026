@@ -81,3 +81,39 @@ def test_cache_override_is_recorded_in_resolved_config(tmp_path, monkeypatch):
         (run_dir / "config.resolved.json").read_text(encoding="utf-8")
     )
     assert resolved["config"]["paths"]["cache_db"] == str(cache_path)
+
+
+def test_mock_run_emits_safe_structured_per_case_progress(
+    tmp_path, monkeypatch, capsys
+):
+    _patch_small_run(monkeypatch)
+    runner.run_experiment(
+        "configs/baseline.yaml",
+        "input.json",
+        resume_run=tmp_path / "run",
+        mock=True,
+        limit=1,
+    )
+
+    events = [
+        json.loads(line.removeprefix(runner.PROGRESS_PREFIX))
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(runner.PROGRESS_PREFIX)
+    ]
+    case_events = [event for event in events if event.get("case_id") == "case_1"]
+
+    assert [(event["stage"], event["status"]) for event in case_events] == [
+        ("preparation", "started"),
+        ("preparation", "completed"),
+        ("prediction", "started"),
+        ("prediction", "completed"),
+    ]
+    completed = case_events[-1]
+    assert completed["index"] == 1
+    assert completed["total"] == 1
+    assert completed["prediction"] == "PARTIAL_A_WIN"
+    assert completed["case_evidence_count"] == 0
+    assert completed["law_evidence_count"] == 1
+    assert "reasoning" not in completed
+    assert "raw_output" not in completed
+    assert "case_query" not in completed
