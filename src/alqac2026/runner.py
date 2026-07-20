@@ -466,8 +466,22 @@ def run_experiment(
             )
         submission = build_submission(results, law_top_k=selected_law_top_k)
         validation = validate_submission(submission, cases, articles)
-        write_json(run_dir / "submission.json", submission)
+        submission_path = run_dir / "submission.json"
+        write_json(submission_path, submission)
+        submission_sha256 = sha256_file(submission_path)
+        submission_bytes = submission_path.stat().st_size
+        validation.update(
+            {
+                "submission_sha256": submission_sha256,
+                "submission_bytes": submission_bytes,
+            }
+        )
         write_json(run_dir / "validation.json", validation)
+        manifest["submission"] = {
+            "sha256": submission_sha256,
+            "bytes": submission_bytes,
+            "cases": len(submission),
+        }
 
         run_network_attempts = (
             cache.run_attempt_stats(run_key)["network_attempts"]

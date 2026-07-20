@@ -38,8 +38,19 @@ def test_colab_notebook_exposes_required_safe_run_controls():
     assert "SOURCE_MODE = 'git'" in text
     assert "GIT_REF = 'TuanAnh'" in text
     assert "'git', 'clone', '--branch', GIT_REF, '--single-branch'" in text
-    for secret_name in ("GITHUB_TOKEN", "HF_TOKEN", "ALQAC_TEAM_TOKEN"):
-        assert secret_name in text
+    assert "source_pin.json" in text
+    assert "['git', 'checkout', '--detach', pinned_commit]" in text
+    assert "Run runtime_check first with this RUN_ID" in text
+    assert "runtime_check_status') != 'PASS'" in text
+    assert "Full/resume requires a completed smoke run" in text
+    assert "smoke_manifest.get('git_commit') != pinned_commit" in text
+    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
+    secret_preflight = "".join(notebook["cells"][2]["source"])
+    assert "required_secrets = ('GITHUB_TOKEN',)" in secret_preflight
+    assert "secret_or_none('HF_TOKEN')" not in secret_preflight
+    assert "secret_or_none('ALQAC_TEAM_TOKEN')" not in secret_preflight
+    assert "if hf_token:" in text
+    assert "team_token = secret_or_none('ALQAC_TEAM_TOKEN')" in text
     assert "alqac-pip-check-baseline.json" in text
     assert "introduced new conflicts" in text
     assert "torch_version_after != pip_baseline['torch_version']" in text

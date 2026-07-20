@@ -160,7 +160,7 @@ Team rules:
 - The current baseline/candidate configs use exactly two deterministic queries per case: `court_decision` and normalized `case_query`.
 - `scripts/plan_api_calls.py` reports cache hits/misses without contacting the API.
 - Every live runner requires `--max-network-calls`; cache-only never constructs the HTTP client and records zero network attempts.
-- SQLite commits a successful response and its safe attempt ledger row atomically. With external backup configured, every attempt must be backed up successfully before the next request.
+- SQLite commits a successful response, its safe attempt ledger row, and a pending-backup marker atomically. With external backup configured, every attempt must be backed up successfully before the next request. A resumed live client repairs pending state before returning a cache hit or sending another request; restore preserves a newer local database while that marker is pending.
 - API responses are checkpointed into prepared contexts for resume.
 - `chunk_id` is stored as a string and can carry opaque hashed values.
 - During retrieval, the runner emits safe `ALQAC_PROGRESS` events for cache hits/misses, HTTP request start/completion, HTTP errors, exceptions, and scheduled retries. Events include only `case_id`, query type, attempt metadata, status metadata, and latency; they never include the query text, response text, headers, or token.

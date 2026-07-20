@@ -38,7 +38,7 @@ Status: `CPU/mock verified`.
 
 Live production retrieval uses exactly two deterministic queries (`court_decision` and normalized `case_query`). Public development uses zero-network `cache-only`: cache hits are reused and misses return empty evidence without constructing an HTTP client.
 
-The official call count is permanent across runs. Live preflight, a hard network cap, and cache/checkpoint reuse are therefore part of scoring safety. A successful response and ledger row share one transaction; every attempt is backed up to external SQLite before the next request, and backup failure stops the run.
+The official call count is permanent across runs. Live preflight, a hard network cap, and cache/checkpoint reuse are therefore part of scoring safety. A successful response, ledger row, and pending-backup marker share one transaction. Every attempt is backed up to external SQLite before the next request; a new live client repairs pending state before any cache hit or request, and backup failure stops the run.
 
 Returned `chunk_id` values are treated as opaque throughout the pipeline and validator. No `_chunk_` or `_seg_` prefix is inferred.
 
@@ -77,13 +77,13 @@ The selected Qwen3-8B model is open-weight and below the official 10-billion-par
 
 ## Submission and evaluation
 
-The validator checks exact fields and labels, non-empty opaque identifiers, corpus-valid law pairs and strict types, duplicates, strict JSON, and the 10 MB limit. It is `CPU/mock verified`; official refreshed-format acceptance remains pending.
+The validator checks exact fields and labels, non-empty opaque identifiers, corpus-valid law pairs and strict types, duplicates, strict JSON, and the 10 MB limit. Validation and manifest artifacts bind the exact submission SHA-256 and byte length; export rechecks both bindings and the actual case count. It is `CPU/mock verified`; official refreshed-format acceptance remains pending.
 
 Public evaluation supports Outcome Accuracy, Micro Law Evidence F1, law Recall@5, format failures, and run-local API statistics. Public data does not contain gold case `chunk_id`, so official Penalized Case Recall and FinalScore require the leaderboard.
 
 ## Runtime and artifacts
 
-`scripts/check_runtime.py` loads embedding, reranker, and Qwen before any live request. Retrieval contexts are then prepared before Qwen loads for the run so retrieval GPU memory can be released. The Drive-first Colab notebook stores track-specific checkpoints and safe exports while SQLite/model/index working copies stay local.
+`scripts/check_runtime.py` loads embedding, reranker, and Qwen before any live request. The first runtime gate for a Colab `RUN_ID` pins one exact Git commit, and smoke/full/resume detach at that commit. Retrieval contexts are then prepared before Qwen loads for the run so retrieval GPU memory can be released. The Drive-first Colab notebook stores track-specific checkpoints and safe exports while SQLite/model/index working copies stay local.
 
 Each run records:
 

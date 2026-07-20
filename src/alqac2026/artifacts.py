@@ -54,6 +54,12 @@ def restore_sqlite_cache(backup_path: str | Path, local_path: str | Path) -> boo
     """
     source = Path(backup_path)
     target = Path(local_path)
+    if target.exists():
+        _validate_sqlite(target)
+        if _sqlite_backup_pending(target):
+            # A failed prior Drive backup left newer committed local state. Preserve
+            # it so the next live client can publish it before any cache hit/request.
+            return False
     if not source.exists():
         return False
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +118,24 @@ def export_run(run_dir: str | Path, export_dir: str | Path) -> Path:
         raise ValueError("Run is not exportable; submission is missing")
     if submission_path.stat().st_size > MAX_SUBMISSION_BYTES:
         raise ValueError("Run is not exportable; submission exceeds 10 MB")
+    submission_payload = json.loads(submission_path.read_text(encoding="utf-8"))
+    if not isinstance(submission_payload, list):
+        raise ValueError("Run is not exportable; submission root is not a list")
+    if len(submission_payload) != validation.get("cases"):
+        raise ValueError("Run is not exportable; submission case count changed")
+    actual_sha256 = _sha256(submission_path)
+    actual_bytes = submission_path.stat().st_size
+    manifest_submission = manifest.get("submission", {})
+    if (
+        validation.get("submission_sha256") != actual_sha256
+        or validation.get("submission_bytes") != actual_bytes
+        or manifest_submission.get("sha256") != actual_sha256
+        or manifest_submission.get("bytes") != actual_bytes
+        or manifest_submission.get("cases") != len(submission_payload)
+    ):
+        raise ValueError(
+            "Run is not exportable; submission bytes do not match validation/manifest"
+        )
 
     target.mkdir(parents=True, exist_ok=True)
     copied = []
@@ -144,6 +168,25 @@ def _validate_sqlite(path: Path) -> None:
         connection.close()
     if row is None or row[0] != "ok":
         raise ValueError(f"SQLite cache integrity check failed: {row}")
+
+
+def _sqlite_backup_pending(path: Path) -> bool:
+    connection = sqlite3.connect(path)
+    try:
+        table = connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'cache_state'
+            """
+        ).fetchone()
+        if table is None:
+            return False
+        row = connection.execute(
+            "SELECT value FROM cache_state WHERE key = 'backup_pending'"
+        ).fetchone()
+        return row is not None and row[0] == "1"
+    finally:
+        connection.close()
 
 
 def _sha256(path: Path) -> str:

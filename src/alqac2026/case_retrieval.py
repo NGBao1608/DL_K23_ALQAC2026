@@ -107,6 +107,20 @@ class SQLiteEvidenceCache:
             )
             """
         )
+        self.connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cache_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO cache_state (key, value)
+            VALUES ('backup_pending', '0')
+            """
+        )
         columns = {
             row[1] for row in self.connection.execute("PRAGMA table_info(api_call_log)")
         }
@@ -168,6 +182,7 @@ class SQLiteEvidenceCache:
                 exception_type=exception_type,
                 success=success,
             )
+            self._set_backup_pending(True)
 
     def record_success(
         self,
@@ -205,6 +220,7 @@ class SQLiteEvidenceCache:
                     time.time(),
                 ),
             )
+            self._set_backup_pending(True)
 
     def _insert_attempt(
         self,
@@ -241,6 +257,21 @@ class SQLiteEvidenceCache:
         if row is None or row[0] != "ok":
             raise ValueError(f"SQLite cache integrity check failed: {row}")
 
+    def has_pending_backup(self) -> bool:
+        row = self.connection.execute(
+            "SELECT value FROM cache_state WHERE key = 'backup_pending'"
+        ).fetchone()
+        return row is not None and row[0] == "1"
+
+    def _set_backup_pending(self, pending: bool) -> None:
+        self.connection.execute(
+            """
+            INSERT OR REPLACE INTO cache_state (key, value)
+            VALUES ('backup_pending', ?)
+            """,
+            ("1" if pending else "0",),
+        )
+
     def backup_to(self, destination: str | Path) -> Path:
         """Create a consistent SQLite backup and atomically publish it."""
         target = Path(destination)
@@ -256,6 +287,13 @@ class SQLiteEvidenceCache:
             backup_connection = sqlite3.connect(temporary)
             try:
                 self.connection.backup(backup_connection)
+                backup_connection.execute(
+                    """
+                    INSERT OR REPLACE INTO cache_state (key, value)
+                    VALUES ('backup_pending', '0')
+                    """
+                )
+                backup_connection.commit()
             finally:
                 backup_connection.close()
             verified = sqlite3.connect(temporary)
@@ -266,6 +304,8 @@ class SQLiteEvidenceCache:
             if row is None or row[0] != "ok":
                 raise ValueError(f"SQLite backup integrity check failed: {row}")
             temporary.replace(target)
+            with self.connection:
+                self._set_backup_pending(False)
             return target
         finally:
             if temporary.exists():
@@ -341,6 +381,10 @@ class CaseContentClient:
         self.clock = clock
         self.progress_callback = progress_callback
         self.backup_path = Path(backup_path) if backup_path is not None else None
+        self.cache.integrity_check()
+        if self.backup_path is not None and self.cache.has_pending_backup():
+            # Publish prior committed state before any cache hit or request.
+            self.cache.backup_to(self.backup_path)
         self._last_call = 0.0
         existing_stats = self.cache.run_attempt_stats(run_key)
         self.network_calls = int(existing_stats["network_attempts"])

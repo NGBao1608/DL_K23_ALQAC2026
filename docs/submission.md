@@ -146,5 +146,7 @@ Private Test permits at most three named runs in total and the best run counts. 
 - Submission builder: implemented and CPU/mock verified.
 - Coverage/label/law-pair validation: implemented and CPU/mock verified.
 - Opaque `chunk_id`, strict schema/type, and 10 MB validation: `CPU/mock verified`.
+- Validation/export binding by submission SHA-256, byte length, and actual case
+  count: `CPU/mock verified`.
 - Manual upload: supported operationally, never automated.
 - Updated-format official result: no current run is `leaderboard verified`.

@@ -87,15 +87,15 @@ python scripts/run_public.py \
 
 ## Google Colab workflow
 
-`notebooks/colab_rag.ipynb` is the canonical Drive-first runner for both tracks. Every Run All clones the latest `TuanAnh` branch with `GITHUB_TOKEN` and records the resolved commit. Before cloning, the notebook requires accessible `GITHUB_TOKEN`, `HF_TOKEN`, and `ALQAC_TEAM_TOKEN` Colab Secrets. It restores the shared SQLite cache and fingerprinted law index to local Colab storage, verifies embedding/reranker/Qwen before any live request, checkpoints each case to Drive, and exports only validated artifacts. `requirements-colab.txt` preserves Colab's preinstalled Torch/CUDA build.
+`notebooks/colab_rag.ipynb` is the canonical Drive-first runner for both tracks. The first `runtime_check` for a `RUN_ID` resolves the current `TuanAnh` head and persists its exact commit SHA; later smoke, full, and resume stages detach at that SHA. Use a new `RUN_ID` to adopt newer branch code. `GITHUB_TOKEN` is required for a private repository, `HF_TOKEN` is optional, and `ALQAC_TEAM_TOKEN` is read only for Private `live` execution. The notebook restores the shared SQLite cache and fingerprinted law index to local Colab storage, verifies embedding/reranker/Qwen before any live request, checkpoints each case to Drive, and exports only validated artifacts. `requirements-colab.txt` preserves Colab's preinstalled Torch/CUDA build.
 
 Recommended Public order:
 
 1. `RUN_MODE='runtime_check'`, `TRACK='public'`, `EXECUTION_MODE='cache-only'`.
-2. `RUN_MODE='smoke'` for two cases.
-3. A new `RUN_ID` with `RUN_MODE='full'` for all 50 cases.
+2. Keep the same `RUN_ID` and use `RUN_MODE='smoke'` for two cases.
+3. Keep the same `RUN_ID` and use `RUN_MODE='full'` for all 50 cases.
 
-The initial Secret preflight verifies that `ALQAC_TEAM_TOKEN` is configured, but Public cache-only execution never exports it to the runner, never instantiates the HTTP client, and records zero network attempts. It evaluates Outcome Accuracy and Law F1, writes `selection_profile.json`, and does not estimate official Case Recall.
+Public cache-only execution neither reads `ALQAC_TEAM_TOKEN` nor instantiates the HTTP client and records zero network attempts. It evaluates Outcome Accuracy and Law F1, writes `selection_profile.json`, and does not estimate official Case Recall.
 
 Equivalent Public CLI:
 
@@ -132,7 +132,8 @@ The validator accepts exact opaque API identifiers without inferring `_chunk_` o
 
 A run directory contains:
 
-- `submission.json` and `validation.json`;
+- `submission.json` and `validation.json`, cryptographically bound by the
+  submission SHA-256 and byte length recorded in validation and manifest;
 - `config.resolved.json` and `environment.json`;
 - `manifest.json` and `api_stats.json`, plus `api_plan.json` for non-mock retrieval;
 - `runtime_check.json` from the zero-API model gate and Public `selection_profile.json` when available;

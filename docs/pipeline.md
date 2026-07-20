@@ -61,7 +61,7 @@ Important retrieval phrases include “chấp nhận yêu cầu khởi kiện”
 
 Execution is explicit: `mock` uses no models or API, `cache-only` runs the real model stack but returns empty evidence for cache misses, and `live` enables the official API. Cache-only never reads the team token or instantiates the HTTP client and fixes the network cap at zero. Every live run requires an explicit `max_network_calls` value.
 
-Preflight counts logical queries, cache hits, and cache misses without contacting the official API. A successful response and its attempt ledger row are committed in one SQLite transaction. When `cache_backup_db` is configured, every success, HTTP error, or exception produces a verified atomic backup before another request is attempted; backup failure stops the run.
+Preflight counts logical queries, cache hits, and cache misses without contacting the official API. A successful response, its attempt ledger row, and a pending-backup marker are committed in one SQLite transaction. When `cache_backup_db` is configured, every success, HTTP error, or exception produces a verified atomic backup before another request is attempted. On resume, a new live client repairs pending backup state before returning a cache hit or sending a request; backup failure stops the run.
 
 During retrieval, `ALQAC_PROGRESS` records safe lifecycle events (`request_started`, `request_completed`, `http_error`, `request_exception`, `retry_scheduled`, `cache_hit`, and `cache_miss`) without exposing query text, response text, headers, or secrets.
 
@@ -136,7 +136,7 @@ Status: `CPU/mock verified`.
 
 ## 6. Submission validator
 
-The validator checks coverage, duplicate cases, exact labels and fields, strict `law_id`/`aid` types, corpus-valid law pairs, non-empty opaque case identifiers, duplicate evidence, strict JSON serialization, and the 10 MB file limit. It preserves identifiers exactly and never infers `_chunk_` or `_seg_` patterns.
+The validator checks coverage, duplicate cases, exact labels and fields, strict `law_id`/`aid` types, corpus-valid law pairs, non-empty opaque case identifiers, duplicate evidence, strict JSON serialization, and the 10 MB file limit. It preserves identifiers exactly and never infers `_chunk_` or `_seg_` patterns. The runner records the validated submission SHA-256 and byte length in both validation and manifest; export recomputes them and rejects stale or replaced submissions and count mismatches.
 
 Status for refreshed submissions: `CPU/mock verified`; real refreshed API identifiers and leaderboard acceptance are pending.
 
@@ -159,7 +159,7 @@ Status: outcome/law evaluation is `CPU/mock verified`; official scoring is not l
 
 ## 8. Checkpointing and artifacts
 
-Each run records resolved configuration, environment, API preflight, prepared contexts, predictions, API statistics, validation, metrics, errors, law selection, and a manifest containing Git/model/corpus/input identifiers. `scripts/check_runtime.py` creates the zero-API embedding/reranker/Qwen gate before live retrieval.
+Each run records resolved configuration, environment, API preflight, prepared contexts, predictions, API statistics, validation, metrics, errors, law selection, and a manifest containing Git/model/corpus/input identifiers. `scripts/check_runtime.py` creates the zero-API embedding/reranker/Qwen gate before live retrieval. In Colab, that gate persists one exact source commit per `RUN_ID`; smoke, full, and resume must use the same pin, and full/resume also require a completed two-case smoke manifest from that commit.
 
 Successful API responses and prepared contexts are reused during resume. Run identity includes input, config, execution mode, limit, storage paths, selection profile, and source fingerprint. The Drive-first Colab notebook restores SQLite/model/index artifacts to local storage, checkpoints runs under track-specific Drive directories, and exports only allowlisted validated files plus SHA-256 checksums.
 

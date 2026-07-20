@@ -57,7 +57,7 @@ python scripts/validate_submission.py \
 
 ## 3. Colab model-only gate
 
-Use `notebooks/colab_rag.ipynb` on one Google Colab T4 session. Before Run All, configure and grant notebook access to `GITHUB_TOKEN`, `HF_TOKEN`, and `ALQAC_TEAM_TOKEN` in Colab Secrets. The GitHub PAT should have read-only repository contents access. The notebook mounts `MyDrive/ALQAC2026`, clones the latest `TuanAnh` branch, records the resolved commit SHA, restores the cache/index, and runs with:
+Use `notebooks/colab_rag.ipynb` on one Google Colab T4 session. Before Run All, configure `GITHUB_TOKEN` for read-only private-repository access. `HF_TOKEN` is optional and only improves Hugging Face download reliability. Configure `ALQAC_TEAM_TOKEN` before a Private live run; Public cache-only stages do not read it. The notebook mounts `MyDrive/ALQAC2026`, resolves the current `TuanAnh` head during the first runtime gate for a `RUN_ID`, persists the exact commit SHA, restores the cache/index, and runs with:
 
 ```python
 TRACK = "public"
@@ -67,9 +67,14 @@ EXECUTION_MODE = "cache-only"
 
 `scripts/check_runtime.py` must load and execute embedding, reranker, and Qwen sequentially, write `runtime_check.json` with `status=PASS`, and report zero ALQAC API attempts. Do not proceed to live retrieval if any model download, CUDA allocation, index, adapter, or generation check fails.
 
+The same `RUN_ID` must be kept for its runtime gate, two-case smoke, full run,
+and resume. Later stages detach at the persisted commit and fail if the runtime
+gate or smoke artifact belongs to another commit. Create a new `RUN_ID` to test
+newer branch code.
+
 ## 4. Public cache-only validation
 
-Public API experimentation is disabled because organizer logs are append-only across Public and Private activity. Run two cases first, then all 50 cases with a new `RUN_ID`:
+Public API experimentation is disabled because organizer logs are append-only across Public and Private activity. Run two cases first, then all 50 cases with the same source-pinned `RUN_ID`:
 
 ```bash
 python scripts/run_public.py \
@@ -89,9 +94,9 @@ This validates GPU inference, law retrieval, resume, formatting, and outcome/law
 
 The canonical file has SHA-256 `9db83cf98ade7d19df52c60145830bebcc192e064ec830bcd285cefbfddf0252` and 60 unique objects containing exactly `case_id` and `case_query`. Place it at `MyDrive/ALQAC2026/inputs/private/ALQAC_private_test.json`; never copy it into Git, source bundles, or exports.
 
-Set `TRACK='private'`, `EXECUTION_MODE='live'`, a new `RUN_ID`, and the Public `selection_profile.json`. The notebook clones the latest `TuanAnh` commit. Complete the model-only gate before the organizer token is exported to the runner.
+Set `TRACK='private'`, `EXECUTION_MODE='live'`, a new `RUN_ID`, and the Public `selection_profile.json`. Complete the model-only gate to pin and verify one exact commit before the organizer token is read or exported to the runner. Keep that `RUN_ID` for smoke, full, and resume.
 
-Run a two-case smoke in `<RUN_ID>-smoke` with hard cap four. Each success records the response and attempt atomically, then publishes a verified SQLite backup to Drive before another request is allowed. Never upload the limited output.
+Run a two-case smoke in `<RUN_ID>-smoke` with hard cap four. Each success records the response, attempt, and pending-backup marker atomically, then publishes a verified SQLite backup to Drive before another request is allowed. A resumed live client must repair any pending backup before serving a cache hit or sending a request. Never upload the limited output.
 
 Run all 60 cases in a different directory. Reuse the smoke cache; approve current cache misses plus at most four retry attempts. If that reserve is exhausted, stop and require an explicit new cap before resume. Do not resume the limited run as full.
 
@@ -110,7 +115,7 @@ python scripts/run_private.py \
   --max-network-calls APPROVED_PRIVATE_BUDGET
 ```
 
-Require exactly 60 completed cases, `validation=PASS`, exact opaque API identifiers, corpus-valid `{law_id, aid}`, a file below 10 MB, and matching export checksums.
+Require exactly 60 completed cases, `validation=PASS`, exact opaque API identifiers, corpus-valid `{law_id, aid}`, a file below 10 MB, and a submission SHA-256/byte length that match both `validation.json` and `manifest.json`. Export rechecks these bindings and the actual JSON case count.
 
 ## 6. Manual leaderboard submission
 

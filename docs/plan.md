@@ -51,7 +51,7 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 
 1. Run the Colab model-only gate and persist the fingerprinted law index without loading the organizer token.
 2. Complete a two-case then 50-case Public `cache-only` run; require zero network attempts and persist `selection_profile.json`.
-3. Confirm the latest resolved commit cloned from `TuanAnh` and validate the canonical 60-case Private input on Drive.
+3. Keep the `RUN_ID` source pin from the passing runtime gate through smoke/full/resume and validate the canonical 60-case Private input on Drive.
 4. Review the two-query preflight, run two Private cases with cap four, and verify atomic external cache backup.
 5. Run full Private in a new directory using smoke cache and a cap of current misses plus the approved retry reserve.
 6. Validate complete coverage, export checksums, assign a distinct Private run name, and manually use **Check format**.

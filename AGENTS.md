@@ -41,6 +41,9 @@ Read only the relevant canonical documents:
 - Never modify raw official data.
 - Never upload a leaderboard submission automatically.
 - Do not upload mock, partial, failed, or unvalidated output.
+- A Colab `RUN_ID` pins one exact Git commit at the runtime gate. Its smoke,
+  full, and resume stages must execute that same commit; use a new `RUN_ID` to
+  adopt newer branch code.
 - The official submission limits conflict: the competition website says three submissions per day, while the leaderboard rules say 20 per team per 24 hours. Treat this as `Needs confirmation` and enforce the stricter team limit of at most three submissions in any 24-hour period.
 - Private Test permits at most three distinctly named runs in total; run names cannot be reused and the best run counts.
 

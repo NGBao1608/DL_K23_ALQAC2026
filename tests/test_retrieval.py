@@ -428,4 +428,60 @@ def test_backup_failure_stops_before_retry(tmp_path, monkeypatch):
         client.retrieve("case_1", "query", query_type="original")
     assert len(session.calls) == 1
     assert cache.known_cumulative_attempts() == 1
+    assert cache.has_pending_backup()
+    cache.close()
+
+
+def test_new_live_client_repairs_pending_backup_before_cache_hit(
+    tmp_path, monkeypatch
+):
+    cache = SQLiteEvidenceCache(tmp_path / "local.sqlite")
+    backup_path = tmp_path / "drive" / "case_api.sqlite"
+    first_session = FakeSession(
+        [FakeResponse(200, {"results": [{"chunk_id": "opaque", "text": "x"}]})]
+    )
+    first_client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=1,
+        request_interval_seconds=0,
+        session=first_session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+        backup_path=backup_path,
+    )
+    original_backup = cache.backup_to
+    monkeypatch.setattr(
+        cache,
+        "backup_to",
+        lambda path: (_ for _ in ()).throw(OSError("drive unavailable")),
+    )
+    with pytest.raises(OSError, match="drive unavailable"):
+        first_client.retrieve("case_1", "query", query_type="original")
+    assert cache.has_pending_backup()
+
+    monkeypatch.setattr(cache, "backup_to", original_backup)
+    resumed_session = FakeSession([])
+    resumed_client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=1,
+        request_interval_seconds=0,
+        session=resumed_session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+        backup_path=backup_path,
+    )
+    result = resumed_client.retrieve("case_1", "query", query_type="original")
+    assert result[0]["chunk_id"] == "opaque"
+    assert resumed_session.calls == []
+    assert not cache.has_pending_backup()
+    backup = SQLiteEvidenceCache(backup_path)
+    assert backup.contains("case_1", "query")
+    assert not backup.has_pending_backup()
+    backup.close()
     cache.close()
