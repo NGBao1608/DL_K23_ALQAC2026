@@ -89,6 +89,10 @@ python scripts/run_public.py \
 
 `notebooks/colab_rag.ipynb` is the canonical Drive-first runner for both tracks. The first `runtime_check` for a `RUN_ID` resolves the current `TuanAnh` head and persists its exact commit SHA; later smoke, full, and resume stages detach at that SHA. Use a new `RUN_ID` to adopt newer branch code. `GITHUB_TOKEN` is required for a private repository, `HF_TOKEN` is optional, and `ALQAC_TEAM_TOKEN` is read only for Private `live` execution. The notebook restores the shared SQLite cache and fingerprinted law index to local Colab storage, verifies embedding/reranker/Qwen before any live request, checkpoints each case to Drive, and exports only validated artifacts. `requirements-colab.txt` preserves Colab's preinstalled Torch/CUDA build.
 
+The dependency cell removes the unused preinstalled `gradio` and `gradio-client`
+packages before installing the Transformers 4.x stack. This avoids their incompatible
+Hugging Face Hub requirement while keeping the final `pip check` fail-closed.
+
 Recommended Public order:
 
 1. `RUN_MODE='runtime_check'`, `TRACK='public'`, `EXECUTION_MODE='cache-only'`.

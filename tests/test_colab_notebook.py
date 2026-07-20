@@ -52,6 +52,11 @@ def test_colab_notebook_exposes_required_safe_run_controls():
     assert "if hf_token:" in text
     assert "team_token = secret_or_none('ALQAC_TEAM_TOKEN')" in text
     assert "alqac-pip-check-baseline.json" in text
+    assert "('gradio', 'gradio-client')" in text
+    assert "'pip', 'uninstall', '-q', '-y', *unused_colab_packages" in text
+    assert text.index("'pip', 'uninstall'") < text.index(
+        "'pip', 'install', '-q', '-r', 'requirements-colab.txt'"
+    )
     assert "introduced new conflicts" in text
     assert "torch_version_after != pip_baseline['torch_version']" in text
 
