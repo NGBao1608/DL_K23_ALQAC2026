@@ -35,9 +35,9 @@ baseline is captured before dependency installation.
 
 The project does not use Colab's preinstalled Gradio UI. Current Gradio 6.x requires
 `huggingface-hub>=1`, which conflicts with the selected Transformers 4.x runtime.
-The dependency cell therefore removes only `gradio` and `gradio-client` before
-installing `requirements-colab.txt`; it still fails on every remaining new
-`pip check` conflict.
+The dependency cell therefore removes only the unused `gradio`, `gradio-client`,
+and `hf-gradio` UI stack before installing `requirements-colab.txt`; it still
+fails on every remaining new `pip check` conflict.
 
 ## 2. CPU/mock smoke test
 

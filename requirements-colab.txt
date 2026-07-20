@@ -1,6 +1,6 @@
 # Colab installs keep the preinstalled torch/CUDA build unchanged.
-# The notebook removes preinstalled Gradio because it is unused and its
-# huggingface-hub>=1 dependency conflicts with the Transformers 4.x runtime.
+# The notebook removes the unused Gradio UI stack, including hf-gradio, because
+# its huggingface-hub>=1 dependency conflicts with the Transformers 4.x runtime.
 python-dotenv>=1.0,<2
 pyyaml>=6.0,<7
 requests>=2.31,<3
