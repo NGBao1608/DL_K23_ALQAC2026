@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -96,11 +97,7 @@ class ALQACPipeline:
 
     def prepare_case(self, case: InferenceCase, law_top_k: int = 5) -> PreparedCase:
         case_evidence, api_calls = self.case_retriever.retrieve(case)
-        enriched_query = case.case_query
-        if case_evidence:
-            enriched_query += "\n" + "\n".join(
-                item.text[:500] for item in case_evidence[:8]
-            )
+        enriched_query = build_law_query(case, case_evidence)
         law_evidence = self.law_retriever.search(enriched_query, top_k=law_top_k)
         return PreparedCase(case, case_evidence, law_evidence, api_calls)
 
@@ -134,3 +131,52 @@ class ALQACPipeline:
 
     def predict_case(self, case: InferenceCase, law_top_k: int = 5) -> PredictionResult:
         return self.predict_prepared(self.prepare_case(case, law_top_k=law_top_k))
+
+
+def build_law_query(
+    case: InferenceCase,
+    case_evidence: list[CaseEvidence],
+    *,
+    max_evidence_sentences: int = 6,
+) -> str:
+    """Build a compact legal-retrieval query without arbitrary prefix slicing."""
+    sections = [re.sub(r"\s+", " ", case.case_query).strip()]
+    dispute = re.search(
+        r"tranh chấp[^.,;?\n]*", case.case_query, flags=re.IGNORECASE
+    )
+    if dispute:
+        sections.append(dispute.group(0).strip())
+
+    keywords = (
+        "điều ",
+        "bộ luật",
+        "luật ",
+        "nghị định",
+        "nghị quyết",
+        "yêu cầu",
+        "chấp nhận",
+        "không chấp nhận",
+        "tuyên xử",
+        "nghĩa vụ",
+    )
+    selected = []
+    ordered = sorted(
+        case_evidence,
+        key=lambda item: (
+            0 if item.query_type == "court_decision" else 1,
+            -item.score,
+        ),
+    )
+    for evidence in ordered:
+        sentences = re.split(r"(?<=[.!?;])\s+|\n+", evidence.text)
+        for sentence in sentences:
+            normalized = re.sub(r"\s+", " ", sentence).strip()
+            lowered = normalized.lower()
+            if normalized and any(keyword in lowered for keyword in keywords):
+                selected.append(normalized[:800])
+                if len(selected) >= max_evidence_sentences:
+                    break
+        if len(selected) >= max_evidence_sentences:
+            break
+    sections.extend(selected)
+    return "\n".join(dict.fromkeys(section for section in sections if section))

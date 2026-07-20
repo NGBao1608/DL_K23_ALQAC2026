@@ -1,8 +1,8 @@
 # Submission Specification and Checklist
 
-**Last checked:** 2026-07-14
+**Last checked:** 2026-07-20
 
-**Sources:** [task rules](https://alqac2026-leaderboard.ngrok.app/about), [submission page](https://alqac2026-leaderboard.ngrok.app/submit), and the leaderboard update announcement.
+**Sources:** [task rules](https://alqac2026-leaderboard.ngrok.app/about), [submission page](https://alqac2026-leaderboard.ngrok.app/submit), [official competition website](https://sites.google.com/view/alqac2026), and the leaderboard update announcement.
 
 ## Required file
 
@@ -51,6 +51,13 @@ PARTIAL_A_WIN
 PARTIAL_B_WIN
 ```
 
+Official partial-label boundary:
+
+- `PARTIAL_A_WIN`: the court accepts more than 50% of the plaintiff's main claim;
+- `PARTIAL_B_WIN`: the court accepts 50% or less of the plaintiff's main claim.
+
+For multiple-claim cases, focus on the main claim described in `case_query`.
+
 ### `case_evidence`
 
 - Required and must be a JSON list of strings.
@@ -70,7 +77,7 @@ PARTIAL_B_WIN
 - `aid` is the article's corpus `aid`, not its position and not free text.
 - Avoid duplicate `{law_id, aid}` pairs.
 
-## Leaderboard workflow
+## Public leaderboard workflow
 
 1. Generate a candidate `submission.json` from a completed run.
 2. Run the local validator against the exact test input and law corpus.
@@ -80,7 +87,23 @@ PARTIAL_B_WIN
 6. Upload `submission.json` and submit it for scoring.
 7. Record the official result with the config, Git revision, model revisions, and run manifest.
 
-The public leaderboard shows the best run per team. The official limit is 20 submissions per team per 24 hours. This repository must never submit automatically.
+The public leaderboard shows the best run per team and accepts repeated Public submissions.
+
+## Private submission workflow
+
+1. Select a completed, full, non-mock Private run with exactly 60 cases.
+2. Validate the exact file against `data/raw/ALQAC_private_test.json`.
+3. Choose a distinct, reproducible run name tied to the local manifest.
+4. Select **Private Test**, upload the file, enter the run name, and use **Check format**.
+5. Confirm the case count and remaining-run message before final submission.
+6. Manually confirm submission; a run name cannot be reused.
+7. Record the team's visible score and submission identifier locally without recording credentials.
+
+Private Test permits at most three named runs in total and the best run counts. Private rankings are hidden from the public leaderboard until the organizers reveal them.
+
+## Submission-limit conflict
+
+`Needs confirmation`: the official competition website says at most three submissions per day, while the leaderboard rules say 20 submissions per team per 24 hours. Follow the stricter team rule: at most three submissions in any 24-hour period, while also respecting the separate three-run lifetime limit for Private Test. This repository must never submit automatically.
 
 ## Validation checklist
 
@@ -99,6 +122,9 @@ The public leaderboard shows the best run per team. The official limit is 20 sub
 - [ ] All predictions completed successfully.
 - [ ] JSON serialization is strict and contains no NaN values.
 - [ ] The local opaque-ID validator reports `PASS`.
+- [ ] The run respects the stricter three-submissions-per-24-hours team limit.
+- [ ] For Private Test, the run name is distinct and the team has fewer than three prior Private runs.
+- [ ] For Private Test, the website's **Check format** step succeeds before final confirmation.
 
 ## Common rejection or scoring risks
 
@@ -112,7 +138,8 @@ The public leaderboard shows the best run per team. The official limit is 20 sub
 - Uploading a partial smoke-run file.
 - Uploading a mock prediction file.
 - Reusing an old-format Public submission after the schema update.
-- Trusting the current local `_chunk_` prefix check before it is fixed.
+- Spending a Private run slot on an unreviewed configuration or a reused run name.
+- Following the leaderboard's 20-per-24-hours platform cap while violating the competition website's stricter three-per-day rule.
 
 ## Current implementation status
 
@@ -120,4 +147,4 @@ The public leaderboard shows the best run per team. The official limit is 20 sub
 - Coverage/label/law-pair validation: implemented and CPU/mock verified.
 - Opaque `chunk_id`, strict schema/type, and 10 MB validation: `CPU/mock verified`.
 - Manual upload: supported operationally, never automated.
-- Updated-format leaderboard result: not leaderboard verified.
+- Updated-format official result: no current run is `leaderboard verified`.

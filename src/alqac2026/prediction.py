@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import json
+from dataclasses import dataclass
 from typing import Protocol
 
 from .schemas import CaseEvidence, InferenceCase, LawEvidence, OutcomeLabel
@@ -18,7 +19,8 @@ Nhãn hợp lệ:
 - B_WIN: Tòa bác toàn bộ yêu cầu chính của nguyên đơn.
 
 Không suy diễn tình tiết không có trong evidence. Trả về đúng một JSON object:
-{"reasoning":"lập luận ngắn gọn theo Issue-Rule-Application-Conclusion","label":"NHÃN"}
+{"main_claim":"yêu cầu chính","accepted_scope":"phần được chấp nhận",
+"acceptance_ratio":0.6,"reasoning":"lập luận ngắn gọn","label":"NHÃN"}
 """
 
 
@@ -46,7 +48,11 @@ Nếu không đủ số liệu định lượng, đánh giá số lượng và t
 tế chỉ chấp nhận một phần.
 
 Trả về đúng một JSON object, không markdown và không văn bản ngoài JSON:
-{"reasoning":"nêu yêu cầu chính, phần được chấp nhận và căn cứ chọn nhãn","label":"NHÃN"}
+{"main_claim":"yêu cầu chính","accepted_scope":"phần được chấp nhận",
+"acceptance_ratio":0.6,"reasoning":"lập luận ngắn gọn","label":"NHÃN"}
+
+acceptance_ratio phải nằm trong [0, 1] nếu có thể xác định; dùng null khi evidence
+không đủ để định lượng. label phải nhất quán với acceptance_ratio và quy tắc trên.
 """
 
 
@@ -82,21 +88,77 @@ def build_user_prompt(
     law_evidence: list[LawEvidence],
     case_evidence_chars: int = 1400,
     law_evidence_chars: int = 1200,
+    *,
+    tokenizer=None,
+    evidence_token_budget: int | None = None,
+    law_top_k: int = 5,
+    case_token_share: float = 0.65,
 ) -> str:
     selected_cases = sorted(
         case_evidence,
         key=lambda item: (PRIORITY.get(item.query_type, 8), -item.score),
     )[:8]
-    cases_text = "\n\n".join(
-        f"[{item.chunk_id} | {item.query_type}] {item.text[:case_evidence_chars]}"
-        for item in selected_cases
-    ) or "Không truy hồi được bằng chứng vụ án."
-    laws_text = "\n\n".join(
-        f"[{item.law_id} | aid={item.aid}] {item.text[:law_evidence_chars]}"
-        for item in law_evidence[:5]
-    ) or "Không truy hồi được điều luật."
+    selected_laws = law_evidence[:law_top_k]
+    if evidence_token_budget is None:
+        cases_text = "\n\n".join(
+            f"[chunk_id={item.chunk_id} | query_type={item.query_type} | "
+            f"score={item.score!r}] "
+            f"{item.text[:case_evidence_chars]}"
+            for item in selected_cases
+        ) or "Không truy hồi được bằng chứng vụ án."
+        laws_text = "\n\n".join(
+            f"[law_id={item.law_id} | aid={item.aid} | "
+            f"article_number={item.article_number!r} | score={item.score!r}] "
+            f"{item.text[:law_evidence_chars]}"
+            for item in selected_laws
+        ) or "Không truy hồi được điều luật."
+    else:
+        if evidence_token_budget < 0:
+            raise ValueError("evidence_token_budget must be non-negative")
+        if not 0 < case_token_share < 1:
+            raise ValueError("case_token_share must be between zero and one")
+        encode, decode = _token_codec(tokenizer)
+        case_blocks = [
+            (
+                f"[chunk_id={item.chunk_id} | query_type={item.query_type} | "
+                f"score={item.score!r}]",
+                item.text,
+            )
+            for item in selected_cases
+        ]
+        law_blocks = [
+            (
+                f"[law_id={item.law_id} | aid={item.aid} | "
+                f"article_number={item.article_number!r} | score={item.score!r}]",
+                item.text,
+            )
+            for item in selected_laws
+        ]
+        case_budget = int(evidence_token_budget * case_token_share)
+        law_budget = evidence_token_budget - case_budget
+        cases_text, case_used = _fit_blocks(
+            case_blocks, case_budget, encode=encode, decode=decode
+        )
+        laws_text, law_used = _fit_blocks(
+            law_blocks, law_budget, encode=encode, decode=decode
+        )
+        if case_used < case_budget and law_blocks:
+            laws_text, law_used = _fit_blocks(
+                law_blocks,
+                law_budget + case_budget - case_used,
+                encode=encode,
+                decode=decode,
+            )
+        if law_used < law_budget and case_blocks:
+            cases_text, _ = _fit_blocks(
+                case_blocks,
+                case_budget + law_budget - law_used,
+                encode=encode,
+                decode=decode,
+            )
+        cases_text = cases_text or "Không truy hồi được bằng chứng vụ án."
+        laws_text = laws_text or "Không truy hồi được điều luật."
     return f"""## Vụ án
-case_id: {case.case_id}
 case_query: {case.case_query}
 
 ## Bằng chứng vụ án
@@ -109,16 +171,112 @@ Hãy xác định yêu cầu chính, đối chiếu evidence với luật, rồi
 Chỉ trả về JSON theo schema đã yêu cầu."""
 
 
-def parse_prediction(text: str) -> tuple[OutcomeLabel, str]:
+def _token_codec(tokenizer):
+    if tokenizer is None:
+        return (
+            lambda text: text.split(),
+            lambda tokens: " ".join(str(token) for token in tokens),
+        )
+
+    def encode(text: str):
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    def decode(tokens) -> str:
+        return tokenizer.decode(tokens, skip_special_tokens=True)
+
+    return encode, decode
+
+
+def _fit_blocks(blocks, budget: int, *, encode, decode) -> tuple[str, int]:
+    if budget <= 0:
+        return "", 0
+    rendered = []
+    used = 0
+    for header, body in blocks:
+        header_tokens = encode(header)
+        separator_tokens = encode(" ")
+        minimum = len(header_tokens) + len(separator_tokens)
+        if used + minimum >= budget:
+            break
+        body_tokens = encode(body)
+        available = budget - used - minimum
+        kept = body_tokens[:available]
+        if not kept:
+            break
+        rendered.append(f"{header} {decode(kept).strip()}")
+        used += minimum + len(kept)
+    return "\n\n".join(rendered), used
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedPrediction:
+    label: OutcomeLabel
+    claimed_label: OutcomeLabel
+    reasoning: str
+    main_claim: str
+    accepted_scope: str
+    acceptance_ratio: float | None
+    inconsistent: bool
+
+
+def _label_from_ratio(ratio: float) -> OutcomeLabel:
+    if ratio == 1.0:
+        return OutcomeLabel.A_WIN
+    if ratio == 0.0:
+        return OutcomeLabel.B_WIN
+    if ratio > 0.5:
+        return OutcomeLabel.PARTIAL_A_WIN
+    return OutcomeLabel.PARTIAL_B_WIN
+
+
+def parse_structured_prediction(text: str) -> ParsedPrediction:
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end < start:
         raise ValueError("Model output does not contain a JSON object")
     payload = json.loads(text[start : end + 1])
-    label = OutcomeLabel(payload["label"])
+    required = {
+        "main_claim",
+        "accepted_scope",
+        "acceptance_ratio",
+        "reasoning",
+        "label",
+    }
+    missing = required - set(payload)
+    if missing:
+        raise ValueError(f"Model output is missing fields: {sorted(missing)}")
+    claimed_label = OutcomeLabel(payload["label"])
     reasoning = str(payload.get("reasoning", "")).strip()
     if not reasoning:
         raise ValueError("Model output is missing reasoning")
-    return label, reasoning
+    main_claim = str(payload.get("main_claim", "")).strip()
+    accepted_scope = str(payload.get("accepted_scope", "")).strip()
+    if not main_claim or not accepted_scope:
+        raise ValueError("main_claim and accepted_scope must be non-empty strings")
+    ratio_value = payload.get("acceptance_ratio")
+    if ratio_value is None:
+        ratio = None
+        final_label = claimed_label
+    else:
+        if isinstance(ratio_value, bool) or not isinstance(ratio_value, (int, float)):
+            raise ValueError("acceptance_ratio must be a number or null")
+        ratio = float(ratio_value)
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError("acceptance_ratio must be within [0, 1]")
+        final_label = _label_from_ratio(ratio)
+    return ParsedPrediction(
+        label=final_label,
+        claimed_label=claimed_label,
+        reasoning=reasoning,
+        main_claim=main_claim,
+        accepted_scope=accepted_scope,
+        acceptance_ratio=ratio,
+        inconsistent=final_label is not claimed_label,
+    )
+
+
+def parse_prediction(text: str) -> tuple[OutcomeLabel, str]:
+    parsed = parse_structured_prediction(text)
+    return parsed.label, parsed.reasoning
 
 
 class TransformersQwenBackend:
@@ -130,6 +288,7 @@ class TransformersQwenBackend:
         max_input_tokens: int = 7000,
         max_new_tokens: int = 384,
         thinking: bool = False,
+        adapter_path: str | None = None,
     ):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -151,29 +310,45 @@ class TransformersQwenBackend:
             trust_remote_code=True,
             revision=revision,
         ).eval()
+        if adapter_path:
+            from peft import PeftModel
+
+            self.model = PeftModel.from_pretrained(self.model, adapter_path).eval()
         self.max_input_tokens = max_input_tokens
         self.max_new_tokens = max_new_tokens
         self.thinking = thinking
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
-        import torch
-
+    def _render_prompt(self, system_prompt: str, user_prompt: str) -> str:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
-        prompt = self.tokenizer.apply_chat_template(
+        return self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
             enable_thinking=self.thinking,
         )
+
+    def count_input_tokens(self, system_prompt: str, user_prompt: str) -> int:
+        prompt = self._render_prompt(system_prompt, user_prompt)
+        return len(self.tokenizer.encode(prompt, add_special_tokens=False))
+
+    def generate(self, system_prompt: str, user_prompt: str) -> str:
+        import torch
+
+        prompt = self._render_prompt(system_prompt, user_prompt)
         inputs = self.tokenizer(
             prompt,
             return_tensors="pt",
-            truncation=True,
-            max_length=self.max_input_tokens,
+            truncation=False,
         ).to(self.model.device)
+        input_tokens = int(inputs["input_ids"].shape[1])
+        if input_tokens > self.max_input_tokens:
+            raise ValueError(
+                f"Prompt exceeds token budget: {input_tokens} > "
+                f"{self.max_input_tokens}"
+            )
         with torch.inference_mode():
             output = self.model.generate(
                 **inputs,
@@ -204,6 +379,9 @@ class OutcomePredictor:
         system_prompt: str = SYSTEM_PROMPT,
         case_evidence_chars: int = 1400,
         law_evidence_chars: int = 1200,
+        max_input_tokens: int = 6144,
+        context_law_top_k: int = 5,
+        verification_reserve_tokens: int = 512,
     ):
         if case_evidence_chars <= 0 or law_evidence_chars <= 0:
             raise ValueError("Evidence character budgets must be positive")
@@ -211,6 +389,73 @@ class OutcomePredictor:
         self.system_prompt = system_prompt
         self.case_evidence_chars = case_evidence_chars
         self.law_evidence_chars = law_evidence_chars
+        self.max_input_tokens = max_input_tokens
+        self.context_law_top_k = context_law_top_k
+        self.verification_reserve_tokens = verification_reserve_tokens
+
+    def _build_prompt(
+        self,
+        case: InferenceCase,
+        case_evidence: list[CaseEvidence],
+        law_evidence: list[LawEvidence],
+    ) -> str:
+        tokenizer = getattr(self.backend, "tokenizer", None)
+        count_tokens = getattr(self.backend, "count_input_tokens", None)
+        if tokenizer is None or count_tokens is None:
+            return build_user_prompt(
+                case,
+                case_evidence,
+                law_evidence,
+                case_evidence_chars=self.case_evidence_chars,
+                law_evidence_chars=self.law_evidence_chars,
+                law_top_k=self.context_law_top_k,
+            )
+        protected = build_user_prompt(
+            case,
+            [],
+            [],
+            tokenizer=tokenizer,
+            evidence_token_budget=0,
+            law_top_k=self.context_law_top_k,
+        )
+        protected_tokens = int(count_tokens(self.system_prompt, protected))
+        evidence_budget = (
+            self.max_input_tokens
+            - protected_tokens
+            - self.verification_reserve_tokens
+        )
+        if evidence_budget < 0:
+            raise ValueError(
+                "System prompt and case query exceed the protected token budget"
+            )
+        return build_user_prompt(
+            case,
+            case_evidence,
+            law_evidence,
+            tokenizer=tokenizer,
+            evidence_token_budget=evidence_budget,
+            law_top_k=self.context_law_top_k,
+        )
+
+    def _parse_or_repair(self, raw: str) -> tuple[ParsedPrediction, str]:
+        try:
+            return parse_structured_prediction(raw), raw
+        except (KeyError, ValueError, json.JSONDecodeError) as first_error:
+            repair = (
+                "Đầu ra trước không hợp lệ. Hãy sửa thành đúng một JSON object có "
+                "main_claim, accepted_scope, acceptance_ratio, reasoning và label; "
+                "label phải thuộc A_WIN, PARTIAL_A_WIN, PARTIAL_B_WIN, B_WIN. "
+                f"Đầu ra lỗi:\n{raw[:1500]}"
+            )
+            repaired = self.backend.generate(self.system_prompt, repair)
+            try:
+                parsed = parse_structured_prediction(repaired)
+                return parsed, f"{raw}\n---REPAIR---\n{repaired}"
+            except (KeyError, ValueError, json.JSONDecodeError) as second_error:
+                raise ValueError(
+                    "Prediction output failed validation twice: "
+                    f"{first_error}; {second_error}"
+                ) from second_error
 
     def predict(
         self,
@@ -218,31 +463,54 @@ class OutcomePredictor:
         case_evidence: list[CaseEvidence],
         law_evidence: list[LawEvidence],
     ) -> tuple[OutcomeLabel, str, str]:
-        prompt = build_user_prompt(
-            case,
-            case_evidence,
-            law_evidence,
-            case_evidence_chars=self.case_evidence_chars,
-            law_evidence_chars=self.law_evidence_chars,
-        )
+        prompt = self._build_prompt(case, case_evidence, law_evidence)
         raw = self.backend.generate(self.system_prompt, prompt)
-        try:
-            label, reasoning = parse_prediction(raw)
-            return label, reasoning, raw
-        except (KeyError, ValueError, json.JSONDecodeError) as first_error:
-            repair = (
-                "Đầu ra trước không hợp lệ. Hãy sửa thành đúng một JSON object có hai "
-                "trường reasoning và label; label phải thuộc A_WIN, PARTIAL_A_WIN, "
-                f"PARTIAL_B_WIN, B_WIN. Đầu ra lỗi:\n{raw[:1500]}"
-            )
-            repaired = self.backend.generate(self.system_prompt, repair)
+        parsed, combined_raw = self._parse_or_repair(raw)
+        needs_verification = parsed.inconsistent or parsed.label in {
+            OutcomeLabel.PARTIAL_A_WIN,
+            OutcomeLabel.PARTIAL_B_WIN,
+        }
+        if needs_verification:
+            verification = self._build_verification_prompt(prompt, combined_raw)
             try:
-                label, reasoning = parse_prediction(repaired)
-                return label, reasoning, f"{raw}\n---REPAIR---\n{repaired}"
-            except (KeyError, ValueError, json.JSONDecodeError) as second_error:
-                raise ValueError(
-                    f"Prediction output failed validation twice: {first_error}; {second_error}"
-                ) from second_error
+                verified_raw = self.backend.generate(self.system_prompt, verification)
+                parsed = parse_structured_prediction(verified_raw)
+                combined_raw = (
+                    f"{combined_raw}\n---VERIFICATION---\n{verified_raw}"
+                )
+            except (KeyError, ValueError, json.JSONDecodeError):
+                combined_raw = f"{combined_raw}\n---VERIFICATION_FAILED---"
+        return parsed.label, parsed.reasoning, combined_raw
+
+    def _build_verification_prompt(self, prompt: str, raw: str) -> str:
+        prefix = f"""{prompt}
+
+## Kết quả bước đầu cần kiểm tra
+"""
+        suffix = """
+
+Kiểm tra lại duy nhất tỷ lệ phần yêu cầu chính được chấp nhận và ranh giới >50%.
+Trả về lại đúng JSON schema đã yêu cầu."""
+        tokenizer = getattr(self.backend, "tokenizer", None)
+        count_tokens = getattr(self.backend, "count_input_tokens", None)
+        if tokenizer is None or count_tokens is None:
+            return f"{prefix}{raw[-1800:]}{suffix}"
+        encode, decode = _token_codec(tokenizer)
+        base_tokens = int(count_tokens(self.system_prompt, f"{prefix}{suffix}"))
+        available = max(0, self.max_input_tokens - base_tokens)
+        raw_tail = decode(encode(raw)[-available:]).strip() if available else ""
+        verification = f"{prefix}{raw_tail}{suffix}"
+        while (
+            raw_tail
+            and int(count_tokens(self.system_prompt, verification))
+            > self.max_input_tokens
+        ):
+            tail_tokens = encode(raw_tail)
+            raw_tail = decode(tail_tokens[1:]).strip()
+            verification = f"{prefix}{raw_tail}{suffix}"
+        if int(count_tokens(self.system_prompt, verification)) > self.max_input_tokens:
+            raise ValueError("Verifier instructions exceed the input token budget")
+        return verification
 
 
 def create_predictor(config: dict) -> OutcomePredictor:
@@ -253,6 +521,7 @@ def create_predictor(config: dict) -> OutcomePredictor:
         max_input_tokens=int(config.get("max_input_tokens", 7000)),
         max_new_tokens=int(config.get("max_new_tokens", 384)),
         thinking=bool(config.get("thinking", False)),
+        adapter_path=config.get("adapter_path"),
     )
     prompt_variant = config.get("prompt_variant", "baseline_v1")
     if prompt_variant not in SYSTEM_PROMPTS:
@@ -262,4 +531,9 @@ def create_predictor(config: dict) -> OutcomePredictor:
         system_prompt=SYSTEM_PROMPTS[prompt_variant],
         case_evidence_chars=int(config.get("case_evidence_chars", 1400)),
         law_evidence_chars=int(config.get("law_evidence_chars", 1200)),
+        max_input_tokens=int(config.get("max_input_tokens", 6144)),
+        context_law_top_k=int(config.get("context_law_top_k", 5)),
+        verification_reserve_tokens=int(
+            config.get("verification_reserve_tokens", 512)
+        ),
     )

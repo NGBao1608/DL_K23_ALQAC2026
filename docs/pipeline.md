@@ -47,7 +47,7 @@ The following Public-only fields must never become inference features: `verdict_
 
 ## 2. Case evidence retrieval
 
-The current retriever:
+Live retrieval:
 
 - uses two deterministic production queries: `court_decision` and normalized `case_query`;
 - calls official `POST /retrieve` with `X-API-Key`;
@@ -59,9 +59,11 @@ The current retriever:
 
 Important retrieval phrases include “chấp nhận yêu cầu khởi kiện”, “không chấp nhận yêu cầu khởi kiện”, “Hội đồng xét xử nhận định”, and “Tuyên xử”.
 
-Every non-mock run requires an explicit `max_network_calls` value. Preflight counts logical queries, cache hits, and cache misses without contacting the official API. A SQLite ledger records safe metadata for every local HTTP attempt, including failed retries and timeouts.
+Execution is explicit: `mock` uses no models or API, `cache-only` runs the real model stack but returns empty evidence for cache misses, and `live` enables the official API. Cache-only never reads the team token or instantiates the HTTP client and fixes the network cap at zero. Every live run requires an explicit `max_network_calls` value.
 
-During a non-mock run, `ALQAC_PROGRESS` records safe per-request Case Content API lifecycle events (`request_started`, `request_completed`, `http_error`, `request_exception`, `retry_scheduled`, and `cache_hit`). This distinguishes API waiting/retry time from hybrid retrieval or Qwen inference without exposing query text, response text, headers, or secrets.
+Preflight counts logical queries, cache hits, and cache misses without contacting the official API. A successful response and its attempt ledger row are committed in one SQLite transaction. When `cache_backup_db` is configured, every success, HTTP error, or exception produces a verified atomic backup before another request is attempted; backup failure stops the run.
+
+During retrieval, `ALQAC_PROGRESS` records safe lifecycle events (`request_started`, `request_completed`, `http_error`, `request_exception`, `retry_scheduled`, `cache_hit`, and `cache_miss`) without exposing query text, response text, headers, or secrets.
 
 Status: cache, retry, two-query policy, preflight, budget guard, and ledger are `CPU/mock verified`; a clean run against the refreshed official API is not yet recorded as `GPU/API verified`.
 
@@ -80,41 +82,44 @@ Candidate:
 ```text
 BM25 top 50 ─────┐
 Dense top 50 ────┼→ RRF(k=60) top 30 ─┐
-                 │                     ├→ Vietnamese_Reranker → top 5
+                 │                     ├→ Vietnamese_Reranker → top 10
 Exact citations ───────────────────────┘
 ```
 
-The candidate uses `AITeamVN/Vietnamese_Embedding`, normalized dot product, Reciprocal Rank Fusion, and `AITeamVN/Vietnamese_Reranker`. It also extracts up to 12 exact `Điều ...` citations associated with named corpus laws from retrieved case evidence and adds them to the reranker pool. Citation extraction never forces an item directly into the final top five. Returned evidence preserves official `law_id` and `aid`.
+The candidate uses `AITeamVN/Vietnamese_Embedding`, normalized dot product, Reciprocal Rank Fusion, and `AITeamVN/Vietnamese_Reranker`. A controlled law query uses the case query, dispute phrase, claim/decision sentences, and exact citations instead of arbitrary evidence prefixes. Up to 12 exact `Điều ...` citations expand the reranker pool without bypassing reranking. The index metadata binds corpus content, preprocessing schema, model revision, article keys, and embedding dimension.
+
+Prepared contexts retain the top 10 laws. Qwen sees the first five. Public evaluation selects submission top-k from 3 through 10 by Micro Law F1, ties toward the smaller k, and writes a profile that Private consumes as a scalar only.
 
 Status:
 
 - BM25 path: `CPU/mock verified`.
-- Hybrid path: `implemented`; full Kaggle verification is pending.
+- Hybrid path: `implemented`; full Colab verification is pending.
 
 ## 4. Outcome prediction
 
 The current predictor uses pinned `Qwen/Qwen3-8B` with NF4 4-bit quantization, FP16 compute, double quantization, deterministic generation, and thinking disabled.
 
-The candidate uses the `decision_first_v2` prompt. It identifies the plaintiff's main claim, prioritizes `Tuyên xử`/`Quyết định` evidence, separates procedural or independent claims, and estimates the accepted proportion before selecting a label. The `>50%` split between the two partial labels remains a Team implementation heuristic, not a confirmed official definition.
+The candidate uses the `decision_first_v2` prompt. It identifies the plaintiff's main claim, prioritizes `Tuyên xử`/`Quyết định` evidence, separates procedural or independent claims, and estimates the accepted proportion before selecting a label. Its `>50%` boundary for `PARTIAL_A_WIN` versus `PARTIAL_B_WIN` now matches the official competition definition.
 
-Input context contains:
-
-- `case_query`;
-- up to two case evidence segments under the current production query policy, with 2,200 characters per segment for the candidate; and
-- up to five law articles.
+Input context is tokenizer-aware with a 6,144-token input cap and a 384-token output cap. System instructions, `case_query`, and the final JSON instruction are protected; remaining context is allocated approximately 65% to prioritized case evidence and 35% to the first five laws, with unused space reallocated.
 
 The model must emit:
 
 ```json
 {
+  "main_claim": "Primary relief requested",
+  "accepted_scope": "Relief accepted by the court",
+  "acceptance_ratio": 0.6,
   "reasoning": "Short internal reasoning",
   "label": "A_WIN"
 }
 ```
 
-The parser validates JSON and the official label. One repair attempt is allowed; a second failure creates an explicit failed prediction that cannot be submitted.
+The parser validates JSON, ratio range, and the official `>50%` boundary. Numeric ratios deterministically normalize inconsistent labels. Partial or inconsistent results receive one deterministic verifier pass; a malformed first output receives one repair. Unrecoverable output creates a failed result that cannot be submitted. `adapter_path` optionally loads an approved PEFT adapter; no fine-tuning data path is enabled.
 
 Status: `implemented`; not yet supported by a clean recorded `GPU/API verified` run.
+
+The pinned Qwen3-8B, Vietnamese Embedding, and Vietnamese Reranker revisions are public, ungated, Apache-2.0, and each below the official 10-billion-parameter limit according to their Hugging Face metadata checked on 2026-07-20. The production pipeline loads these weights locally, does not call a proprietary model API, and must not use externally annotated legal QA or legal entailment datasets.
 
 ## 5. Submission builder
 
@@ -143,7 +148,8 @@ Public evaluation reports:
 - Micro Law Evidence F1;
 - law Recall@5;
 - format failures; and
-- run-local API statistics.
+- run-local API statistics; and
+- the selected submission law top-k and per-k selection profile.
 
 The current Public file has no gold case `chunk_id`, so offline Case Evidence Recall, Penalized Case Recall, and FinalScore are unavailable. Official values must come from the leaderboard.
 
@@ -153,9 +159,9 @@ Status: outcome/law evaluation is `CPU/mock verified`; official scoring is not l
 
 ## 8. Checkpointing and artifacts
 
-Each run records resolved configuration, environment, API preflight, prepared contexts, predictions, API statistics, validation, metrics, errors, and a manifest containing Git/model/corpus identifiers.
+Each run records resolved configuration, environment, API preflight, prepared contexts, predictions, API statistics, validation, metrics, errors, law selection, and a manifest containing Git/model/corpus/input identifiers. `scripts/check_runtime.py` creates the zero-API embedding/reranker/Qwen gate before live retrieval.
 
-Successful API responses and prepared contexts are reused during resume. Run identity includes input, config, mock/limit settings, and source fingerprint. The SQLite ledger binds attempts to that stable run identity, so a restarted process cannot silently reset its total cap. An explicitly increased cap may be supplied when the team approves additional resume attempts. Kaggle notebooks import/export the SQLite cache separately from submission artifacts.
+Successful API responses and prepared contexts are reused during resume. Run identity includes input, config, execution mode, limit, storage paths, selection profile, and source fingerprint. The Drive-first Colab notebook restores SQLite/model/index artifacts to local storage, checkpoints runs under track-specific Drive directories, and exports only allowlisted validated files plus SHA-256 checksums.
 
 Notebook logic remains thin; reusable behavior belongs in `src/alqac2026`.
 
@@ -167,8 +173,9 @@ Notebook logic remains thin; reusable behavior belongs in `src/alqac2026`.
 | `data.py` | Load and separate inference/gold data; load law corpus |
 | `case_retrieval.py` | Query generation, official API client, throttle, retry, and cache |
 | `law_retrieval.py` | BM25, embedding retrieval, RRF, and reranking |
-| `prediction.py` | Qwen backend, prompt, parser, and one repair attempt |
+| `prediction.py` | Token-aware Qwen context, structured parser, verifier, repair, and optional adapter |
 | `pipeline.py` | Context preparation and prediction orchestration |
 | `evaluation.py` | Public outcome/law metrics and error analysis |
 | `submission.py` | Official output builder and local validation |
 | `runner.py` | Staged execution, checkpointing, resume, and artifacts |
+| `artifacts.py` | Drive layout, verified cache restore, directory sync, and safe exports |

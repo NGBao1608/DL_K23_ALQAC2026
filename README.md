@@ -22,16 +22,17 @@ validated submission.json
 
 ## Critical current warning
 
-The local validator now treats `chunk_id` as an opaque non-empty string and is `CPU/mock verified`. A refreshed real API response and leaderboard result are still pending, so do not claim `GPU/API verified` or `leaderboard verified` yet.
+The local validator treats `chunk_id` as an opaque non-empty string and is `CPU/mock verified`. A prior incomplete Kaggle candidate smoke recorded two HTTP 200 Case API attempts and two cache rows, but stopped during embedding-model download before completing any case. No clean end-to-end run is `GPU/API verified`, and no current result is `leaderboard verified`.
 
-Case Content API calls accumulate permanently across Public and Private runs. Every non-mock run requires an explicit network-attempt cap, and the current baseline/candidate policy uses only `court_decision` plus the normalized `case_query` for each case.
+Case Content API calls accumulate permanently across Public and Private runs. Every live run requires an explicit network-attempt cap; Public model evaluation defaults to zero-network `cache-only`. The live baseline/candidate policy uses only `court_decision` plus the normalized `case_query` for each case.
+
+Official participation rules allow only open-weight models with fewer than 10 billion parameters, prohibit proprietary/non-open model APIs, and prohibit externally annotated legal QA or legal entailment datasets. The current Qwen3-8B stack fits the model contract.
 
 ## Repository layout
 
 ```text
 configs/            Baseline and candidate configurations
-data/raw/           Organizer-provided Public Test and law corpus
-data/private/       Private Test input; never commit
+data/raw/           Organizer data; the local Private Test file is git-ignored
 src/alqac2026/      Production package
 scripts/            CLI entry points
 notebooks/          Thin Kaggle/Colab orchestration
@@ -84,59 +85,48 @@ python scripts/run_public.py \
 
 `outputs/smoke/validation.json` must report `PASS`. Mock metrics are not model results and the resulting file must never be uploaded.
 
-## Public development
+## Google Colab workflow
 
-Use `notebooks/public_development.ipynb` on Kaggle T4. Keep `RUN_MODE='smoke'` for the first real two-case run. Only use `RUN_MODE='full'` after the smoke run completes with valid API/model artifacts.
+`notebooks/colab_rag.ipynb` is the canonical Drive-first runner for both tracks. Every Run All clones the latest `TuanAnh` branch with `GITHUB_TOKEN` and records the resolved commit. Before cloning, the notebook requires accessible `GITHUB_TOKEN`, `HF_TOKEN`, and `ALQAC_TEAM_TOKEN` Colab Secrets. It restores the shared SQLite cache and fingerprinted law index to local Colab storage, verifies embedding/reranker/Qwen before any live request, checkpoints each case to Drive, and exports only validated artifacts. `requirements-colab.txt` preserves Colab's preinstalled Torch/CUDA build.
 
-CLI equivalents:
+Recommended Public order:
+
+1. `RUN_MODE='runtime_check'`, `TRACK='public'`, `EXECUTION_MODE='cache-only'`.
+2. `RUN_MODE='smoke'` for two cases.
+3. A new `RUN_ID` with `RUN_MODE='full'` for all 50 cases.
+
+The initial Secret preflight verifies that `ALQAC_TEAM_TOKEN` is configured, but Public cache-only execution never exports it to the runner, never instantiates the HTTP client, and records zero network attempts. It evaluates Outcome Accuracy and Law F1, writes `selection_profile.json`, and does not estimate official Case Recall.
+
+Equivalent Public CLI:
 
 ```bash
-python scripts/plan_api_calls.py \
-  --config configs/baseline.yaml \
-  --input data/raw/ALQAC2026_public_test.json \
-  --cache-db cache/case_api.sqlite \
-  --output outputs/public_baseline_api_plan.json
-
-python scripts/run_public.py \
-  --config configs/baseline.yaml \
-  --resume-run outputs/public_baseline_full \
-  --cache-db cache/case_api.sqlite \
-  --max-network-calls APPROVED_BASELINE_BUDGET
-
-python scripts/build_law_index.py --config configs/candidate.yaml
 python scripts/run_public.py \
   --config configs/candidate.yaml \
+  --execution-mode cache-only \
   --resume-run outputs/public_candidate_full \
   --cache-db cache/case_api.sqlite \
+  --law-index-dir cache/law_index \
   --max-network-calls 0
 ```
 
-Replace `APPROVED_BASELINE_BUDGET` with the reviewed integer from preflight. The candidate command is valid only when preflight reports zero cache misses.
+For Private, place the immutable 60-case file at `MyDrive/ALQAC2026/inputs/private/ALQAC_private_test.json`. Use an exact Git commit, run the model-only gate, then a two-case live smoke with cap four. Run all 60 cases in a different directory, reuse the smoke cache, and set the full cap to current cache misses plus the explicitly approved retry reserve.
 
-Do not run these commands against the real API merely to test setup. Each network call permanently affects the official per-case efficiency count.
-
-## Private inference
-
-After the organizer releases the Private Test input:
+Equivalent Private CLI:
 
 ```bash
 python scripts/run_private.py \
   --config configs/candidate.yaml \
-  --input data/private/private_test.json \
+  --input data/raw/ALQAC_private_test.json \
+  --execution-mode live \
   --resume-run submissions/private_candidate_full \
-  --cache-db cache/private_case_api.sqlite \
+  --cache-db cache/case_api.sqlite \
+  --cache-backup-db /approved/external/case_api.sqlite \
+  --law-index-dir cache/law_index \
+  --selection-profile /approved/public/selection_profile.json \
   --max-network-calls APPROVED_PRIVATE_BUDGET
 ```
 
-Validate the exact candidate file:
-
-```bash
-python scripts/validate_submission.py \
-  --input submissions/private_candidate_full/submission.json \
-  --test-data data/private/private_test.json
-```
-
-The validator accepts exact opaque API identifiers without inferring `_chunk_` or `_seg_` prefixes.
+The validator accepts exact opaque API identifiers without inferring `_chunk_` or `_seg_` prefixes. Fine-tuning is not part of the production path; an optional `--adapter-path` can load a separately approved LoRA adapter.
 
 ## Run artifacts
 
@@ -145,6 +135,7 @@ A run directory contains:
 - `submission.json` and `validation.json`;
 - `config.resolved.json` and `environment.json`;
 - `manifest.json` and `api_stats.json`, plus `api_plan.json` for non-mock retrieval;
+- `runtime_check.json` from the zero-API model gate and Public `selection_profile.json` when available;
 - context/prediction checkpoints;
 - internal predictions; and
 - Public-only metrics/error analysis when applicable.
@@ -153,7 +144,9 @@ Reasoning, evidence text, API counters, raw model output, and tokens are never i
 
 ## Leaderboard workflow
 
-The submission owner manually uploads `submission.json` with the organizer-issued team name and token. The official limit is 20 submissions per team per 24 hours, and the public leaderboard displays the best run per team. The source code never uploads automatically.
+The submission owner manually uploads `submission.json` with the organizer-issued team name and token. Current official pages conflict: the competition website says at most three submissions per day, while the leaderboard rules say 20 per team per 24 hours. Until clarified, follow the stricter team limit of at most three submissions in any 24-hour period.
+
+Public Test can be submitted repeatedly within that limit. Private Test permits at most three distinctly named runs in total, requires **Check format** before final confirmation, and uses the best run. The source code never uploads automatically.
 
 ## Reproducibility and packaging
 
@@ -165,4 +158,4 @@ python scripts/package_source.py
 
 The default bundle is `artifacts/alqac2026_source.zip`. It excludes data, secrets, caches, weights, logs, outputs, and submissions.
 
-Operational details are in [docs/runbook.md](docs/runbook.md). Source-code and technical-report delivery requirements are currently `Needs confirmation` because the refreshed official pages do not state them.
+Operational details are in [docs/runbook.md](docs/runbook.md). The official competition website encourages a short technical report and says the organizers may request source code, configuration, or logs. Whether those become mandatory and their deadlines remains `Needs confirmation`.

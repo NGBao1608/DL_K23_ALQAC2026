@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
 import re
 import unicodedata
@@ -11,6 +12,9 @@ import numpy as np
 from rank_bm25 import BM25Okapi
 
 from .schemas import LawArticle, LawEvidence
+
+
+LAW_INDEX_SCHEMA_VERSION = "legal-article-v2"
 
 
 LAW_CITATION_ALIASES = {
@@ -92,13 +96,41 @@ def extract_law_citations(
 
 
 def tokenize_vietnamese(text: str) -> list[str]:
-    text = re.sub(r"\s+", " ", text.lower()).strip()
+    text = normalize_legal_text(text).lower()
     try:
         from pyvi import ViTokenizer
 
         return ViTokenizer.tokenize(text).split()
     except ImportError:
         return re.findall(r"\w+", text, flags=re.UNICODE)
+
+
+def normalize_legal_text(text: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text)).strip()
+
+
+def law_corpus_fingerprint(articles: list[LawArticle]) -> str:
+    digest = hashlib.sha256()
+    for article in articles:
+        digest.update(article.key.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(article.article_number).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(article.text.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def law_index_fingerprint(config: dict, articles: list[LawArticle]) -> str:
+    payload = {
+        "schema_version": LAW_INDEX_SCHEMA_VERSION,
+        "corpus_sha256": law_corpus_fingerprint(articles),
+        "embedding_model": config.get("embedding_model"),
+        "embedding_revision": config.get("embedding_revision"),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:20]
 
 
 class LawRetriever(Protocol):
@@ -193,6 +225,8 @@ class HybridLawRetriever:
 
     def _index_metadata(self) -> dict:
         return {
+            "schema_version": LAW_INDEX_SCHEMA_VERSION,
+            "corpus_sha256": law_corpus_fingerprint(self.articles),
             "embedding_model": self.embedding_model_name,
             "embedding_revision": self.embedding_revision,
             "article_keys": [article.key for article in self.articles],
@@ -206,13 +240,23 @@ class HybridLawRetriever:
         expected = self._index_metadata()
         if embeddings_path.exists() and metadata_path.exists():
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            if metadata == expected:
-                self._embeddings = np.load(embeddings_path, mmap_mode="r")
-                return self._embeddings
+            expected_with_dimension = dict(expected)
+            expected_with_dimension["embedding_dimension"] = metadata.get(
+                "embedding_dimension"
+            )
+            if metadata == expected_with_dimension:
+                values = np.load(embeddings_path, mmap_mode="r")
+                if (
+                    values.ndim == 2
+                    and values.shape[0] == len(self.articles)
+                    and values.shape[1] == metadata["embedding_dimension"]
+                ):
+                    self._embeddings = values
+                    return self._embeddings
 
         model = self._load_embedding_model()
         values = model.encode(
-            [article.text for article in self.articles],
+            [normalize_legal_text(article.text) for article in self.articles],
             batch_size=self.batch_size,
             normalize_embeddings=True,
             show_progress_bar=True,
@@ -220,8 +264,10 @@ class HybridLawRetriever:
         ).astype("float32")
         self.index_dir.mkdir(parents=True, exist_ok=True)
         np.save(embeddings_path, values)
+        metadata = dict(expected)
+        metadata["embedding_dimension"] = int(values.shape[1])
         metadata_path.write_text(
-            json.dumps(expected, ensure_ascii=False), encoding="utf-8"
+            json.dumps(metadata, ensure_ascii=False), encoding="utf-8"
         )
         self._embeddings = values
         return self._embeddings
@@ -229,7 +275,9 @@ class HybridLawRetriever:
     def _dense_ranked(self, query: str) -> list[tuple[int, float]]:
         model = self._load_embedding_model()
         query_vector = model.encode(
-            [query], normalize_embeddings=True, convert_to_numpy=True
+            [normalize_legal_text(query)],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
         )[0].astype("float32")
         scores = np.asarray(self.build_or_load_index()) @ query_vector
         order = np.argsort(-scores)[: self.dense_k]
@@ -246,8 +294,8 @@ class HybridLawRetriever:
             )
         return self._reranker
 
-    def search(self, query: str, top_k: int | None = None) -> list[LawEvidence]:
-        final_k = top_k or self.top_k
+    def retrieve_candidate_indices(self, query: str) -> list[int]:
+        """Run sparse+dense retrieval and citation expansion without reranking."""
         sparse = self.bm25.ranked(query, self.sparse_k)
         dense = self._dense_ranked(query)
         fused = reciprocal_rank_fusion(
@@ -260,9 +308,17 @@ class HybridLawRetriever:
                 query, self.articles, max_citations=self.citation_k
             )
         ]
-        indices = list(
+        return list(
             dict.fromkeys(citation_indices + [index for index, _ in fused])
         )
+
+    def rerank_candidates(
+        self, query: str, indices: list[int], top_k: int | None = None
+    ) -> list[LawEvidence]:
+        """Rerank prepared article indices without loading the embedding model."""
+        final_k = top_k or self.top_k
+        if not indices:
+            return []
         reranker = self._load_reranker()
         pairs = [(query, self.articles[index].text) for index in indices]
         scores = reranker.predict(
@@ -274,17 +330,33 @@ class HybridLawRetriever:
         )[:final_k]
         return [_as_evidence(self.articles[index], score) for index, score in ranked]
 
+    def search(self, query: str, top_k: int | None = None) -> list[LawEvidence]:
+        indices = self.retrieve_candidate_indices(query)
+        return self.rerank_candidates(query, indices, top_k=top_k)
+
+    def release_embedding_model(self) -> None:
+        self._embedding_model = None
+        _clear_accelerator_cache()
+
+    def release_reranker_model(self) -> None:
+        self._reranker = None
+        _clear_accelerator_cache()
+
     def release_gpu_models(self) -> None:
         self._embedding_model = None
         self._reranker = None
-        gc.collect()
-        try:
-            import torch
+        _clear_accelerator_cache()
 
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except ImportError:
-            pass
+
+def _clear_accelerator_cache() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
 
 
 def create_law_retriever(

@@ -12,6 +12,7 @@ ROOT_FILES = {
     "README.md",
     "pyproject.toml",
     "requirements.txt",
+    "requirements-colab.txt",
     ".env.example",
     ".gitignore",
 }

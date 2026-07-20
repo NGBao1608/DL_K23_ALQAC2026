@@ -1,6 +1,6 @@
 # Competition Rules — Synchronized Legacy View
 
-**Last synchronized:** 2026-07-14
+**Last synchronized:** 2026-07-20
 
 **Canonical source:** [`competition.md`](competition.md)
 
@@ -13,11 +13,11 @@ ALQAC 2026 uses **Legal Case Outcome Prediction with Evidence Retrieval**. For e
 Valid labels:
 
 - `A_WIN` — Plaintiff wins.
-- `PARTIAL_A_WIN` — Plaintiff partially wins.
+- `PARTIAL_A_WIN` — More than 50% of the plaintiff's main claim is accepted.
 - `B_WIN` — Defendant wins.
-- `PARTIAL_B_WIN` — Defendant partially wins.
+- `PARTIAL_B_WIN` — 50% or less of the plaintiff's main claim is accepted.
 
-`Needs confirmation`: the refreshed official pages do not define partial outcomes using the older numeric percentage interpretation.
+For multiple-claim cases, focus on the main claim described in `case_query`.
 
 ## Score
 
@@ -60,8 +60,11 @@ Upload one `submission.json` containing one object per test case with exactly:
 - Every test case appears exactly once.
 - Upload size is at most 10 MB.
 - The public leaderboard shows the best run per team.
-- The current limit is 20 submissions per team per 24 hours.
 - Upload is always manual.
+
+`Needs confirmation`: the competition website says at most three submissions per day, while the leaderboard rules say 20 per team per 24 hours. The team follows the stricter limit of at most three submissions in any 24-hour period.
+
+Public submissions may be repeated within that limit. Private Test allows at most three distinctly named runs in total, requires a format-check step before final confirmation, and uses the team's best Private run.
 
 ## Evidence identifiers
 
@@ -81,20 +84,27 @@ The leaderboard announcement says `chunk_id` is now an opaque hashed identifier 
 
 Production inference in this repository consumes only `case_id` and `case_query`; Public gold fields are evaluator-only.
 
+The local `data/raw/ALQAC_private_test.json` contains 60 unique cases with exactly those two fields and is git-ignored.
+
 ## Timeline and restrictions
 
 The official ALQAC landing page lists paper submission on 2026-07-15, notification on 2026-08-31, camera-ready on 2026-09-10, and the conference on 2026-11-11 through 2026-11-14.
 
 These are not assumed to be Public/Private Test or leaderboard deadlines.
 
+Official restrictions:
+
+- only open-weight models with fewer than 10 billion parameters;
+- no proprietary or non-open model APIs; and
+- no externally annotated legal QA or legal entailment datasets.
+
+Online legal-database lookup is permitted. A short technical report is encouraged, and organizers may request source, configuration, or logs for verification.
+
 `Needs confirmation`:
 
 - Public/Private Test and leaderboard deadlines;
-- refreshed Private Test schema;
-- model-size, licensing, and proprietary-API restrictions;
-- external-data restrictions;
-- mandatory source-code delivery; and
-- mandatory technical-report delivery.
+- which conflicting general submission limit governs ranking eligibility; and
+- whether source or report artifacts become mandatory and, if so, their deadlines.
 
 ## Team safeguards
 

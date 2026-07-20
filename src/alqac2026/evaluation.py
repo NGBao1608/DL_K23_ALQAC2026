@@ -42,7 +42,10 @@ def evaluate_law_rankings(
 
 
 def evaluate_public(
-    results: Iterable[PredictionResult], gold_by_case: dict[str, PublicGold]
+    results: Iterable[PredictionResult],
+    gold_by_case: dict[str, PublicGold],
+    *,
+    law_top_k: int | None = None,
 ) -> dict[str, float | int | None]:
     values = list(results)
     missing = [item.case_id for item in values if item.case_id not in gold_by_case]
@@ -55,7 +58,14 @@ def evaluate_public(
         item for item in values if gold_by_case[item.case_id].law_evidence
     ]
     law_predictions = [
-        {(law.law_id, law.aid) for law in item.law_evidence}
+        {
+            (law.law_id, law.aid)
+            for law in (
+                item.law_evidence[:law_top_k]
+                if law_top_k is not None
+                else item.law_evidence
+            )
+        }
         for item in law_eligible
     ]
     law_gold = [
@@ -102,6 +112,31 @@ def evaluate_public(
         "final_score": final_score,
         "format_failures": sum(item.status != "completed" for item in values),
         "api_calls": sum(item.api_calls for item in values),
+    }
+
+
+def select_law_top_k(
+    results: Iterable[PredictionResult],
+    gold_by_case: dict[str, PublicGold],
+    ks: tuple[int, ...] = tuple(range(3, 11)),
+) -> dict:
+    values = list(results)
+    if not ks or any(k <= 0 for k in ks):
+        raise ValueError("ks must contain positive values")
+    scores = {
+        str(k): float(evaluate_public(values, gold_by_case, law_top_k=k)["law_micro_f1"])
+        for k in sorted(set(ks))
+    }
+    best_k = min(
+        (int(k) for k, score in scores.items() if score == max(scores.values())),
+        default=min(ks),
+    )
+    return {
+        "schema_version": "law-top-k-v1",
+        "submission_law_top_k": best_k,
+        "selection_metric": "public_law_micro_f1",
+        "tie_breaker": "smaller_k",
+        "scores": scores,
     }
 
 

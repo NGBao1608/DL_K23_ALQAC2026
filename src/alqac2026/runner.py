@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .case_retrieval import (
+    CachedCaseContentClient,
     CaseContentClient,
     CaseEvidenceRetriever,
     EvidenceQueryGenerator,
@@ -19,12 +20,13 @@ from .config import (
     build_manifest,
     load_config,
     set_seed,
+    sha256_file,
     source_fingerprint,
     write_json,
 )
 from .data import load_inference_cases, load_law_corpus, load_public_gold
-from .evaluation import build_error_analysis, evaluate_public
-from .law_retrieval import create_law_retriever
+from .evaluation import build_error_analysis, evaluate_public, select_law_top_k
+from .law_retrieval import create_law_retriever, law_index_fingerprint
 from .pipeline import ALQACPipeline, CheckpointStore, PreparedCaseStore
 from .prediction import OutcomePredictor, create_predictor
 from .schemas import InferenceCase
@@ -32,6 +34,7 @@ from .submission import build_submission, validate_submission
 
 
 PROGRESS_PREFIX = "ALQAC_PROGRESS "
+EXECUTION_MODES = {"mock", "cache-only", "live"}
 
 
 def _emit_progress(
@@ -70,7 +73,12 @@ class EmptyCaseRetriever:
 
 class FixedBackend:
     def generate(self, system_prompt: str, user_prompt: str) -> str:
-        return '{"reasoning":"Mock prediction for pipeline validation.","label":"PARTIAL_A_WIN"}'
+        return (
+            '{"main_claim":"mock","accepted_scope":"mock partial",'
+            '"acceptance_ratio":0.6,'
+            '"reasoning":"Mock prediction for pipeline validation.",'
+            '"label":"PARTIAL_A_WIN"}'
+        )
 
 
 def run_experiment(
@@ -83,16 +91,44 @@ def run_experiment(
     limit: int | None = None,
     cache_db: str | Path | None = None,
     max_network_calls: int | None = None,
+    execution_mode: str | None = None,
+    cache_backup_db: str | Path | None = None,
+    law_index_dir: str | Path | None = None,
+    selection_profile: str | Path | None = None,
+    adapter_path: str | Path | None = None,
 ) -> dict:
     config = load_config(config_path)
+    mode = execution_mode or ("mock" if mock else "live")
+    if mode not in EXECUTION_MODES:
+        raise ValueError(f"Unsupported execution_mode: {mode}")
+    if mock and mode != "mock":
+        raise ValueError("--mock cannot be combined with a non-mock execution mode")
+    mock = mode == "mock"
     if cache_db is not None:
         config["paths"]["cache_db"] = str(Path(cache_db))
-    if not mock and max_network_calls is None:
+    if law_index_dir is not None:
+        config["paths"]["law_index"] = str(Path(law_index_dir))
+    if adapter_path is not None:
+        config["prediction"]["adapter_path"] = str(Path(adapter_path))
+    if mode == "live" and max_network_calls is None:
         raise ValueError(
-            "Non-mock runs require an explicit max_network_calls budget"
+            "Live runs require an explicit max_network_calls budget"
         )
+    if mode == "live" and cache_backup_db is None:
+        raise ValueError("Live runs require an external cache_backup_db")
+    if (
+        mode == "live"
+        and Path(cache_backup_db).resolve()
+        == Path(config["paths"]["cache_db"]).resolve()
+    ):
+        raise ValueError("Live cache and external backup paths must differ")
     if max_network_calls is not None and max_network_calls < 0:
         raise ValueError("max_network_calls must be non-negative")
+    if mode == "cache-only" and max_network_calls not in {None, 0}:
+        raise ValueError("cache-only runs require max_network_calls=0")
+    if mode == "cache-only":
+        max_network_calls = 0
+    selected_law_top_k = _load_selection_top_k(selection_profile)
     set_seed(int(config["run"].get("seed", 42)))
     corpus_path = Path(config["paths"]["corpus"])
     articles = load_law_corpus(corpus_path)
@@ -108,6 +144,7 @@ def run_experiment(
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     resolved_path = run_dir / "config.resolved.json"
+    current_source_fingerprint = source_fingerprint(Path(__file__).parent)
     resolved_run = {
         "config": config,
         "execution": {
@@ -116,8 +153,16 @@ def run_experiment(
                 str(Path(public_gold_path).resolve()) if public_gold_path else None
             ),
             "mock": mock,
+            "execution_mode": mode,
             "limit": limit,
-            "source_fingerprint": source_fingerprint(Path(__file__).parent),
+            "cache_backup_db": (
+                str(Path(cache_backup_db).resolve()) if cache_backup_db else None
+            ),
+            "selection_profile": (
+                str(Path(selection_profile).resolve()) if selection_profile else None
+            ),
+            "submission_law_top_k": selected_law_top_k,
+            "source_fingerprint": current_source_fingerprint,
         },
     }
     if resume_run and resolved_path.exists():
@@ -130,13 +175,22 @@ def run_experiment(
     ).hexdigest()
 
     manifest = build_manifest(config, corpus_path)
+    manifest["source_sha256"] = current_source_fingerprint
+    manifest["law_index"] = {
+        "fingerprint": law_index_fingerprint(config["law_retrieval"], articles),
+        "path": str(Path(config["paths"]["law_index"]).resolve()),
+    }
     manifest["run"] = {
         "status": "running",
         "cases": len(cases),
         "mock": mock,
+        "execution_mode": mode,
         "completed": 0,
         "api_calls": 0,
     }
+    input_source = Path(input_path)
+    if input_source.is_file():
+        manifest["input_sha256"] = sha256_file(input_source)
     write_json(run_dir / "manifest.json", manifest)
     write_json(run_dir / "environment.json", build_environment())
     case_positions = {case.case_id: index for index, case in enumerate(cases, start=1)}
@@ -210,6 +264,7 @@ def run_experiment(
 
         if not mock:
             cache = SQLiteEvidenceCache(config["paths"]["cache_db"])
+            cache.integrity_check()
 
         if to_prepare:
             law_config = dict(config["law_retrieval"])
@@ -232,34 +287,47 @@ def run_experiment(
                     "network_attempts"
                 ]
                 api_plan["run_key"] = run_key
+                api_plan["execution_mode"] = mode
                 api_plan["run_network_attempts_before"] = run_attempts_before
-                api_plan["remaining_approved_attempts"] = (
-                    int(max_network_calls) - run_attempts_before
+                api_plan["remaining_approved_attempts"] = max(
+                    0, int(max_network_calls or 0) - run_attempts_before
                 )
                 write_json(run_dir / "api_plan.json", api_plan)
-                minimum_total_attempts = (
-                    run_attempts_before + api_plan["cache_misses"]
-                )
-                if minimum_total_attempts > int(max_network_calls):
-                    raise ValueError(
-                        "Approved API budget is smaller than the run attempts already "
-                        "used plus current cache misses: "
-                        f"{max_network_calls} < {minimum_total_attempts}"
+                if mode == "cache-only":
+                    client = CachedCaseContentClient(
+                        cache=cache,
+                        progress_callback=emit_case_api_progress,
                     )
-                token = os.getenv("ALQAC_TEAM_TOKEN", "")
-                client = CaseContentClient(
-                    token=token,
-                    base_url=config["case_retrieval"]["api_base"],
-                    cache=cache,
-                    request_interval_seconds=float(
-                        config["case_retrieval"]["request_interval_seconds"]
-                    ),
-                    timeout_seconds=int(config["case_retrieval"]["timeout_seconds"]),
-                    retries=int(config["case_retrieval"]["retries"]),
-                    max_network_calls=max_network_calls,
-                    run_key=run_key,
-                    progress_callback=emit_case_api_progress,
-                )
+                else:
+                    minimum_total_attempts = (
+                        run_attempts_before + api_plan["cache_misses"]
+                    )
+                    if minimum_total_attempts > int(max_network_calls):
+                        raise ValueError(
+                            "Approved API budget is smaller than the run attempts "
+                            "already used plus current cache misses: "
+                            f"{max_network_calls} < {minimum_total_attempts}"
+                        )
+                    from dotenv import load_dotenv
+
+                    load_dotenv()
+                    token = os.getenv("ALQAC_TEAM_TOKEN", "")
+                    client = CaseContentClient(
+                        token=token,
+                        base_url=config["case_retrieval"]["api_base"],
+                        cache=cache,
+                        request_interval_seconds=float(
+                            config["case_retrieval"]["request_interval_seconds"]
+                        ),
+                        timeout_seconds=int(
+                            config["case_retrieval"]["timeout_seconds"]
+                        ),
+                        retries=int(config["case_retrieval"]["retries"]),
+                        max_network_calls=max_network_calls,
+                        run_key=run_key,
+                        progress_callback=emit_case_api_progress,
+                        backup_path=cache_backup_db,
+                    )
                 case_retriever = CaseEvidenceRetriever(
                     client,
                     query_generator=query_generator,
@@ -280,7 +348,12 @@ def run_experiment(
                 preparation_started = time.perf_counter()
                 try:
                     prepared = preparation_pipeline.prepare_case(
-                        case, law_top_k=int(config["law_retrieval"]["top_k"])
+                        case,
+                        law_top_k=int(
+                            config["law_retrieval"].get(
+                                "retrieval_k", config["law_retrieval"]["top_k"]
+                            )
+                        ),
                     )
                 except Exception as error:
                     _emit_progress(
@@ -351,23 +424,50 @@ def run_experiment(
                     total=len(cases),
                     **progress_details,
                 )
+            backend = getattr(predictor, "backend", None)
+            if backend is not None and hasattr(backend, "release"):
+                backend.release()
 
         results = [results_by_id[case.case_id] for case in cases]
         write_json(
             run_dir / "predictions.json",
             [checkpoint.records[case.case_id] for case in cases],
         )
-        submission = build_submission(results)
-        validation = validate_submission(submission, cases, articles)
-        write_json(run_dir / "submission.json", submission)
-        write_json(run_dir / "validation.json", validation)
-
         metrics = None
         if public_gold_path:
             gold = load_public_gold(public_gold_path, articles)
-            metrics = evaluate_public(results, gold)
+            if selected_law_top_k is None:
+                generated_profile = select_law_top_k(results, gold)
+                selected_law_top_k = int(
+                    generated_profile["submission_law_top_k"]
+                )
+                write_json(run_dir / "selection_profile.json", generated_profile)
+            metrics = evaluate_public(
+                results, gold, law_top_k=selected_law_top_k
+            )
+            metrics["submission_law_top_k"] = selected_law_top_k
             write_json(run_dir / "metrics.json", metrics)
             write_json(run_dir / "errors.json", build_error_analysis(results, gold))
+        elif selection_profile:
+            write_json(
+                run_dir / "selection_profile.json",
+                {
+                    "schema_version": "law-top-k-private-v1",
+                    "submission_law_top_k": selected_law_top_k,
+                    "source_profile_sha256": sha256_file(selection_profile),
+                },
+            )
+
+        if selected_law_top_k is None:
+            selected_law_top_k = int(
+                config["law_retrieval"].get(
+                    "submission_top_k", config["law_retrieval"]["top_k"]
+                )
+            )
+        submission = build_submission(results, law_top_k=selected_law_top_k)
+        validation = validate_submission(submission, cases, articles)
+        write_json(run_dir / "submission.json", submission)
+        write_json(run_dir / "validation.json", validation)
 
         run_network_attempts = (
             cache.run_attempt_stats(run_key)["network_attempts"]
@@ -379,6 +479,7 @@ def run_experiment(
                 "status": "completed",
                 "completed": sum(result.status == "completed" for result in results),
                 "api_calls": run_network_attempts,
+                "submission_law_top_k": selected_law_top_k,
             }
         )
         write_json(
@@ -433,6 +534,19 @@ def run_experiment(
     finally:
         if cache is not None:
             cache.close()
+
+
+def _load_selection_top_k(path: str | Path | None) -> int | None:
+    if path is None:
+        return None
+    source = Path(path)
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("selection_profile must be a JSON object")
+    value = payload.get("submission_law_top_k")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 10:
+        raise ValueError("selection_profile submission_law_top_k must be 1..10")
+    return value
 
 
 def _api_stats(cases, client, cache, run_key, max_network_calls) -> dict:

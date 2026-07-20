@@ -1,6 +1,6 @@
 # ALQAC 2026 Runbook
 
-**Last synchronized:** 2026-07-14
+**Last synchronized:** 2026-07-20
 
 **Canonical references:** [`competition.md`](competition.md), [`data_api.md`](data_api.md), and [`submission.md`](submission.md)
 
@@ -20,9 +20,18 @@ Confirm:
 - the intended branch, commit, input, and config;
 - `ALQAC_TEAM_TOKEN` exists only in approved secret storage;
 - Public/law files match configured paths;
-- Kaggle T4 and Internet are enabled for GPU/API execution;
+- every model is open-weight and below 10 billion parameters;
+- no proprietary model API or externally annotated legal QA/entailment dataset enters the run;
+- Colab T4 and Internet are enabled for GPU/model execution;
 - the run directory is new or belongs to the exact same run identity; and
 - the team has approved the number and purpose of real API calls.
+
+The Colab notebook records the clean-runtime `pip check` result before installing
+project dependencies. It fails only when the ALQAC installation introduces a new
+conflict, while reporting unrelated conflicts already present in the Colab image as
+warnings. It also fails if the installation changes Colab's preinstalled `torch`
+build. Restart the runtime before the first run of an updated notebook so that this
+baseline is captured before dependency installation.
 
 ## 2. CPU/mock smoke test
 
@@ -46,95 +55,75 @@ python scripts/validate_submission.py \
   --limit 2
 ```
 
-## 3. Real two-case smoke test
+## 3. Colab model-only gate
 
-Use `notebooks/public_development.ipynb` with `RUN_MODE='smoke'`.
+Use `notebooks/colab_rag.ipynb` on one Google Colab T4 session. Before Run All, configure and grant notebook access to `GITHUB_TOKEN`, `HF_TOKEN`, and `ALQAC_TEAM_TOKEN` in Colab Secrets. The GitHub PAT should have read-only repository contents access. The notebook mounts `MyDrive/ALQAC2026`, clones the latest `TuanAnh` branch, records the resolved commit SHA, restores the cache/index, and runs with:
 
-Set `APPROVED_MAX_NETWORK_CALLS=4`, use the external writable SQLite cache, and review the preflight report before running. After running, verify:
+```python
+TRACK = "public"
+RUN_MODE = "runtime_check"
+EXECUTION_MODE = "cache-only"
+```
 
-- the Case API returned one segment per successful call;
-- exact returned `chunk_id` values were preserved;
-- successful calls were cached;
-- no successful query was repeated;
-- the five-second rate limit was respected;
-- Qwen3 loaded without OOM;
-- every model output parsed successfully; and
-- artifacts contain no secrets.
+`scripts/check_runtime.py` must load and execute embedding, reranker, and Qwen sequentially, write `runtime_check.json` with `status=PASS`, and report zero ALQAC API attempts. Do not proceed to live retrieval if any model download, CUDA allocation, index, adapter, or generation check fails.
 
-The local opaque-ID validator must report `PASS`. This is still only `CPU/mock verified` until exact refreshed API identifiers complete a real smoke run.
+## 4. Public cache-only validation
 
-## 4. Full Public runs
-
-Run baseline first, then candidate using the same cached case evidence:
+Public API experimentation is disabled because organizer logs are append-only across Public and Private activity. Run two cases first, then all 50 cases with a new `RUN_ID`:
 
 ```bash
-python scripts/plan_api_calls.py \
-  --config configs/baseline.yaml \
-  --input data/raw/ALQAC2026_public_test.json \
-  --cache-db cache/case_api.sqlite \
-  --output outputs/public_baseline_api_plan.json
-
-python scripts/run_public.py \
-  --config configs/baseline.yaml \
-  --resume-run outputs/public_baseline_full \
-  --cache-db cache/case_api.sqlite \
-  --max-network-calls APPROVED_BASELINE_BUDGET
-
-python scripts/build_law_index.py --config configs/candidate.yaml
 python scripts/run_public.py \
   --config configs/candidate.yaml \
+  --execution-mode cache-only \
   --resume-run outputs/public_candidate_full \
   --cache-db cache/case_api.sqlite \
+  --law-index-dir cache/law_index \
   --max-network-calls 0
 ```
 
-Replace `APPROVED_BASELINE_BUDGET` with the reviewed preflight value. Run the candidate only when its preflight reports zero misses. Export the SQLite cache separately after every real run.
+Cache hits preserve previously retrieved exact evidence; misses produce an empty `case_evidence` list and never instantiate the HTTP client. Require 50 completed predictions, zero network attempts, `validation=PASS`, Outcome Accuracy, Law Micro F1, and `selection_profile.json`. The evaluator tries submission law top-k values 3 through 10, maximizes Public Micro Law F1, and breaks ties toward the smaller list.
 
-For the candidate two-case smoke, set `EXPERIMENT='candidate'`, restore the baseline cache, and use a separate candidate smoke directory. The expected approved budget is `0` only when preflight confirms zero misses for those two cases.
+This validates GPU inference, law retrieval, resume, formatting, and outcome/law metrics. It does not estimate official Case Recall or FinalScore. A Public upload remains optional and manual.
 
-Do not change config, input, source, mock mode, or limit while resuming. Save manifests, metrics, validation, and API statistics. The organizer's official cumulative call count is not reset and may differ from run-local counts.
+## 5. Private live run
 
-Compare runs only after both completed under compatible conditions:
+The canonical file has SHA-256 `9db83cf98ade7d19df52c60145830bebcc192e064ec830bcd285cefbfddf0252` and 60 unique objects containing exactly `case_id` and `case_query`. Place it at `MyDrive/ALQAC2026/inputs/private/ALQAC_private_test.json`; never copy it into Git, source bundles, or exports.
 
-```bash
-python scripts/compare_runs.py \
-  outputs/public_baseline_full \
-  outputs/public_candidate_full
-```
+Set `TRACK='private'`, `EXECUTION_MODE='live'`, a new `RUN_ID`, and the Public `selection_profile.json`. The notebook clones the latest `TuanAnh` commit. Complete the model-only gate before the organizer token is exported to the runner.
 
-## 5. Private run
+Run a two-case smoke in `<RUN_ID>-smoke` with hard cap four. Each success records the response and attempt atomically, then publishes a verified SQLite backup to Drive before another request is allowed. Never upload the limited output.
 
-`Needs confirmation`: verify the organizer's refreshed Private Test schema and deadline before execution.
+Run all 60 cases in a different directory. Reuse the smoke cache; approve current cache misses plus at most four retry attempts. If that reserve is exhausted, stop and require an explicit new cap before resume. Do not resume the limited run as full.
+
+Equivalent CLI:
 
 ```bash
 python scripts/run_private.py \
   --config configs/candidate.yaml \
-  --input data/private/private_test.json \
+  --input data/raw/ALQAC_private_test.json \
+  --execution-mode live \
   --resume-run submissions/private_candidate_full \
-  --cache-db cache/private_case_api.sqlite \
+  --cache-db cache/case_api.sqlite \
+  --cache-backup-db /approved/external/case_api.sqlite \
+  --law-index-dir cache/law_index \
+  --selection-profile /approved/public/selection_profile.json \
   --max-network-calls APPROVED_PRIVATE_BUDGET
 ```
 
-Validate the completed candidate:
-
-```bash
-python scripts/validate_submission.py \
-  --input submissions/private_candidate_full/submission.json \
-  --test-data data/private/private_test.json
-```
-
-Check complete coverage, official labels, exact API-returned case evidence, valid corpus `{law_id, aid}` pairs, no extra fields, and strict JSON.
+Require exactly 60 completed cases, `validation=PASS`, exact opaque API identifiers, corpus-valid `{law_id, aid}`, a file below 10 MB, and matching export checksums.
 
 ## 6. Manual leaderboard submission
 
-1. Confirm the candidate is a full non-mock run.
+1. Confirm the candidate is a full completed production run, not mock or limited smoke output.
 2. Confirm validation passes under the refreshed rules.
 3. Review manifest, config, Git revision, and API statistics.
-4. Confirm the team is within 20 submissions per 24 hours.
-5. The submission owner manually enters the team name/token and uploads `submission.json`.
-6. Record official metrics in `experiments.md` without storing credentials.
+4. Apply the stricter team limit of at most three submissions in any 24-hour period because the current official pages conflict.
+5. For Private Test, confirm that fewer than three distinctly named runs have been spent and select a new run name tied to the manifest.
+6. The submission owner manually enters the team name/token and uploads `submission.json`.
+7. For Private Test, use **Check format**, inspect the reported case count and remaining slots, then manually confirm.
+8. Record official metrics and the run name in `experiments.md` without storing credentials.
 
-The leaderboard displays the best run per team. Source code must never upload automatically.
+The Public leaderboard displays the best run per team. Private rankings are hidden publicly, the team can see its own score on the Submit page, and the best of at most three Private runs counts. Source code must never upload automatically.
 
 ## 7. Source bundle
 
@@ -146,7 +135,7 @@ python scripts/package_source.py
 
 Inspect the archive for README, config, source, scripts, notebooks, tests, and docs. It must exclude `.env`, raw/private data, caches, weights, logs, outputs, submissions, and tokens.
 
-`Needs confirmation`: the refreshed official pages do not currently state source-code or technical-report delivery requirements or deadlines.
+The official competition website encourages a short technical report and says organizers may request source code, configuration files, or logs for verification and reproducibility. `Needs confirmation`: whether either artifact becomes mandatory and what deadline or transfer procedure applies.
 
 ## Failure handling
 

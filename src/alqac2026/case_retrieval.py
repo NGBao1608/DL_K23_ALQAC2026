@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import tempfile
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -122,22 +123,22 @@ class SQLiteEvidenceCache:
 
     def put(self, case_id: str, query: str, response: list[dict]) -> None:
         key = cache_key(case_id, query)
-        self.connection.execute(
-            """
-            INSERT OR REPLACE INTO evidence_cache
-            (cache_key, case_id, query, api_version, response_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                key,
-                case_id,
-                normalize_query(query),
-                API_VERSION,
-                json.dumps(response, ensure_ascii=False),
-                time.time(),
-            ),
-        )
-        self.connection.commit()
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO evidence_cache
+                (cache_key, case_id, query, api_version, response_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    key,
+                    case_id,
+                    normalize_query(query),
+                    API_VERSION,
+                    json.dumps(response, ensure_ascii=False),
+                    time.time(),
+                ),
+            )
 
     def contains(self, case_id: str, query: str) -> bool:
         key = cache_key(case_id, query)
@@ -153,6 +154,65 @@ class SQLiteEvidenceCache:
         query_type: str,
         *,
         run_key: str = "unscoped",
+        status_code: int | None = None,
+        exception_type: str | None = None,
+        success: bool = False,
+    ) -> None:
+        with self.connection:
+            self._insert_attempt(
+                case_id,
+                query,
+                query_type,
+                run_key=run_key,
+                status_code=status_code,
+                exception_type=exception_type,
+                success=success,
+            )
+
+    def record_success(
+        self,
+        case_id: str,
+        query: str,
+        query_type: str,
+        response: list[dict],
+        *,
+        run_key: str = "unscoped",
+        status_code: int = 200,
+    ) -> None:
+        """Commit the successful call ledger and reusable response atomically."""
+        key = cache_key(case_id, query)
+        with self.connection:
+            self._insert_attempt(
+                case_id,
+                query,
+                query_type,
+                run_key=run_key,
+                status_code=status_code,
+                success=True,
+            )
+            self.connection.execute(
+                """
+                INSERT OR REPLACE INTO evidence_cache
+                (cache_key, case_id, query, api_version, response_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    key,
+                    case_id,
+                    normalize_query(query),
+                    API_VERSION,
+                    json.dumps(response, ensure_ascii=False),
+                    time.time(),
+                ),
+            )
+
+    def _insert_attempt(
+        self,
+        case_id: str,
+        query: str,
+        query_type: str,
+        *,
+        run_key: str,
         status_code: int | None = None,
         exception_type: str | None = None,
         success: bool = False,
@@ -175,7 +235,41 @@ class SQLiteEvidenceCache:
                 int(success),
             ),
         )
-        self.connection.commit()
+
+    def integrity_check(self) -> None:
+        row = self.connection.execute("PRAGMA integrity_check").fetchone()
+        if row is None or row[0] != "ok":
+            raise ValueError(f"SQLite cache integrity check failed: {row}")
+
+    def backup_to(self, destination: str | Path) -> Path:
+        """Create a consistent SQLite backup and atomically publish it."""
+        target = Path(destination)
+        if target.resolve() == self.path.resolve():
+            raise ValueError("SQLite backup destination must differ from the live DB")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary_handle = tempfile.NamedTemporaryFile(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent, delete=False
+        )
+        temporary = Path(temporary_handle.name)
+        temporary_handle.close()
+        try:
+            backup_connection = sqlite3.connect(temporary)
+            try:
+                self.connection.backup(backup_connection)
+            finally:
+                backup_connection.close()
+            verified = sqlite3.connect(temporary)
+            try:
+                row = verified.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                verified.close()
+            if row is None or row[0] != "ok":
+                raise ValueError(f"SQLite backup integrity check failed: {row}")
+            temporary.replace(target)
+            return target
+        finally:
+            if temporary.exists():
+                temporary.unlink()
 
     def known_cumulative_attempts(self) -> int:
         row = self.connection.execute("SELECT COUNT(*) FROM api_call_log").fetchone()
@@ -227,6 +321,7 @@ class CaseContentClient:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
+        backup_path: str | Path | None = None,
     ):
         token = token.strip()
         if not token:
@@ -245,6 +340,7 @@ class CaseContentClient:
         self.sleep = sleep
         self.clock = clock
         self.progress_callback = progress_callback
+        self.backup_path = Path(backup_path) if backup_path is not None else None
         self._last_call = 0.0
         existing_stats = self.cache.run_attempt_stats(run_key)
         self.network_calls = int(existing_stats["network_attempts"])
@@ -279,6 +375,10 @@ class CaseContentClient:
             )
         self.network_calls += 1
         self.per_case_attempts[case_id] += 1
+
+    def _backup_cache(self) -> None:
+        if self.backup_path is not None:
+            self.cache.backup_to(self.backup_path)
 
     def retrieve(
         self, case_id: str, query: str, query_type: str = "unknown"
@@ -334,6 +434,7 @@ class CaseContentClient:
                     run_key=self.run_key,
                     exception_type=type(error).__name__,
                 )
+                self._backup_cache()
                 self._emit_progress(
                     status="request_exception",
                     case_id=case_id,
@@ -385,6 +486,7 @@ class CaseContentClient:
                         status_code=response.status_code,
                         exception_type=type(error).__name__,
                     )
+                    self._backup_cache()
                     self._emit_progress(
                         status="invalid_response",
                         case_id=case_id,
@@ -396,17 +498,17 @@ class CaseContentClient:
                         latency_seconds=latency_seconds,
                     )
                     raise
-                self.cache.log_attempt(
+                self.cache.record_success(
                     case_id,
                     query,
                     query_type,
+                    results,
                     run_key=self.run_key,
                     status_code=response.status_code,
-                    success=True,
                 )
+                self._backup_cache()
                 self.successful_calls += 1
                 self.per_case_successes[case_id] += 1
-                self.cache.put(case_id, query, results)
                 self._emit_progress(
                     status="request_completed",
                     case_id=case_id,
@@ -425,6 +527,7 @@ class CaseContentClient:
                 run_key=self.run_key,
                 status_code=response.status_code,
             )
+            self._backup_cache()
             self._emit_progress(
                 status="http_error",
                 case_id=case_id,
@@ -441,17 +544,14 @@ class CaseContentClient:
                     "X-Request-ID", response.headers.get("X-Amzn-Trace-Id", "unknown")
                 )
                 ngrok_codes = sorted(set(re.findall(r"ERR_NGROK_\d+", response.text)))
-                response_preview = re.sub(r"\s+", " ", response.text).strip()[:300]
-                if self.token:
-                    response_preview = response_preview.replace(self.token, "<redacted>")
                 raise PermissionError(
                     "Case API rejected ALQAC_TEAM_TOKEN (403); "
                     f"url={response.url}; server={server}; content_type={content_type}; "
                     f"request_id={request_id}; ngrok_codes={ngrok_codes or 'none'}; "
-                    f"response={response_preview or '<empty>'}"
+                    "response_body=<redacted>"
                 )
             if response.status_code == 422:
-                raise ValueError(f"Malformed Case API request: {payload}")
+                raise ValueError("Malformed Case API request (422); payload redacted")
             if response.status_code == 429 or 500 <= response.status_code < 600:
                 if attempt + 1 < self.retries:
                     retry_delay_seconds = self.request_interval_seconds * (2**attempt)
@@ -467,6 +567,54 @@ class CaseContentClient:
                     continue
             response.raise_for_status()
         raise RuntimeError(f"Case API failed after {self.retries} attempts: {case_id}")
+
+
+class CachedCaseContentClient:
+    """Read-only cache client used for zero-network model evaluation."""
+
+    def __init__(
+        self,
+        cache: SQLiteEvidenceCache,
+        progress_callback: Callable[[dict[str, object]], None] | None = None,
+    ):
+        self.cache = cache
+        self.progress_callback = progress_callback
+        self.network_calls = 0
+        self.successful_calls = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.per_case_cache_hits: dict[str, int] = defaultdict(int)
+
+    def _emit_progress(self, **event: object) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(event)
+        except Exception:
+            return
+
+    def retrieve(
+        self, case_id: str, query: str, query_type: str = "unknown"
+    ) -> list[dict]:
+        cached = self.cache.get(case_id, query)
+        if cached is None:
+            self.cache_misses += 1
+            self._emit_progress(
+                status="cache_miss",
+                case_id=case_id,
+                query_type=query_type,
+                result_count=0,
+            )
+            return []
+        self.cache_hits += 1
+        self.per_case_cache_hits[case_id] += 1
+        self._emit_progress(
+            status="cache_hit",
+            case_id=case_id,
+            query_type=query_type,
+            result_count=len(cached),
+        )
+        return cached
 
 
 class CaseEvidenceRetriever:

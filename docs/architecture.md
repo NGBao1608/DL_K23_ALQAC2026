@@ -1,6 +1,6 @@
 # Architecture — Synchronized Legacy View
 
-**Last synchronized:** 2026-07-14
+**Last synchronized:** 2026-07-20
 
 **Canonical source:** [`pipeline.md`](pipeline.md)
 
@@ -36,9 +36,9 @@ Status: `CPU/mock verified`.
 
 ## Case evidence stage
 
-The production retriever uses exactly two deterministic queries (`court_decision` and normalized `case_query`), calls official `POST /retrieve`, throttles to one request every five seconds, permits one bounded transient retry, caches successful responses in SQLite, and de-duplicates exact `chunk_id` values.
+Live production retrieval uses exactly two deterministic queries (`court_decision` and normalized `case_query`). Public development uses zero-network `cache-only`: cache hits are reused and misses return empty evidence without constructing an HTTP client.
 
-The official call count is permanent across runs. Preflight cache-miss planning, an explicit hard network cap, a safe SQLite attempt ledger, and cache/checkpoint reuse are therefore part of scoring safety, not only performance optimization.
+The official call count is permanent across runs. Live preflight, a hard network cap, and cache/checkpoint reuse are therefore part of scoring safety. A successful response and ledger row share one transaction; every attempt is backed up to external SQLite before the next request, and backup failure stops the run.
 
 Returned `chunk_id` values are treated as opaque throughout the pipeline and validator. No `_chunk_` or `_seg_` prefix is inferred.
 
@@ -57,21 +57,23 @@ Candidate:
 ```text
 BM25 top 50 ─────┐
 Dense top 50 ────┼→ RRF(k=60) top 30 ─┐
-                 │                     ├→ Vietnamese_Reranker → top 5
+                 │                     ├→ Vietnamese_Reranker → top 10
 Exact citations ───────────────────────┘
 ```
 
-The candidate uses `AITeamVN/Vietnamese_Embedding` and `AITeamVN/Vietnamese_Reranker`. Up to 12 corpus-valid citations extracted from case evidence expand the reranker pool without bypassing reranking. Evidence preserves corpus-valid `law_id` and `aid`.
+The candidate uses a controlled case/evidence query, `AITeamVN/Vietnamese_Embedding`, and `AITeamVN/Vietnamese_Reranker`. Up to 12 corpus-valid citations expand the reranker pool without bypassing reranking. The checkpoint keeps top 10, Qwen reads top five, and Public evaluation selects submission top-k 3–10.
 
 Status: BM25 is `CPU/mock verified`; the hybrid candidate is `implemented`.
 
 ## Outcome stage
 
-The predictor uses pinned `Qwen/Qwen3-8B`, NF4 4-bit, FP16 compute, double quantization, deterministic generation, and thinking disabled. The candidate's decision-first prompt prioritizes the main claim and `Tuyên xử`/`Quyết định` evidence. Under the current two-query policy, context includes `case_query`, up to two case segments, and up to five law articles.
+The predictor uses pinned `Qwen/Qwen3-8B`, NF4 4-bit, FP16 compute, deterministic generation, and thinking disabled. Token-aware context protects the prompt/query/final instruction under a 6,144-token cap and allocates remaining space to prioritized case evidence and five law articles.
 
-The model returns internal `{reasoning, label}` JSON. The parser validates the official label and permits one repair attempt. A second failure creates an explicit failed result that cannot be submitted.
+The model returns structured main claim, accepted scope, acceptance ratio, reasoning, and label. Numeric ratios enforce the official boundary; partial or inconsistent results receive a verifier pass, and malformed output receives one repair. An optional approved PEFT adapter may be loaded, but no fine-tuning dataset path is enabled.
 
 Status: `implemented`; a clean refreshed `GPU/API verified` run is pending.
+
+The selected Qwen3-8B model is open-weight and below the official 10-billion-parameter limit. Proprietary model APIs and externally annotated legal QA/entailment datasets are outside the allowed architecture boundary.
 
 ## Submission and evaluation
 
@@ -81,7 +83,9 @@ Public evaluation supports Outcome Accuracy, Micro Law Evidence F1, law Recall@5
 
 ## Runtime and artifacts
 
-Retrieval contexts are prepared before Qwen loads so embedding/reranker GPU memory can be released. Each run records:
+`scripts/check_runtime.py` loads embedding, reranker, and Qwen before any live request. Retrieval contexts are then prepared before Qwen loads for the run so retrieval GPU memory can be released. The Drive-first Colab notebook stores track-specific checkpoints and safe exports while SQLite/model/index working copies stay local.
+
+Each run records:
 
 - resolved config and environment;
 - prepared-context and prediction checkpoints;
@@ -105,5 +109,6 @@ Notebook code remains thin; reusable behavior belongs in `src/alqac2026`.
 | `evaluation.py` | Public metrics and error analysis |
 | `submission.py` | Submission builder and local validator |
 | `runner.py` | Staged execution, resume, and artifacts |
+| `artifacts.py` | Drive layout, cache restore, directory sync, and safe export |
 
 Implementation priorities are maintained in [`plan.md`](plan.md); team choices and rejected alternatives are maintained in [`decisions.md`](decisions.md).

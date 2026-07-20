@@ -5,7 +5,7 @@ run:
 paths:
   corpus: data/raw/corpus_law_pub.json
   public_test: data/raw/ALQAC2026_public_test.json
-  private_test: data/private/private_test.json
+  private_test: data/raw/ALQAC_private_test.json
   cache_db: cache/case_api.sqlite
   law_index: cache/law_index
   output_dir: outputs
@@ -27,6 +27,8 @@ law_retrieval:
   dense_k: 50
   candidate_k: 30
   top_k: 5
+  retrieval_k: 10
+  submission_top_k: 5
   rrf_k: 60
   batch_size: 4
   citation_k: 12
@@ -35,9 +37,12 @@ prediction:
   model_name: Qwen/Qwen3-8B
   revision: b968826d9c46dd6066d109eabc6255188de91218
   load_in_4bit: true
-  max_input_tokens: 7000
+  max_input_tokens: 6144
   max_new_tokens: 384
   thinking: false
+  adapter_path: null
+  context_law_top_k: 5
+  verification_reserve_tokens: 512
   prompt_variant: decision_first_v2
   case_evidence_chars: 2200
   law_evidence_chars: 1200

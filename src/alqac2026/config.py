@@ -100,6 +100,8 @@ def build_environment() -> dict[str, Any]:
         "transformers",
         "sentence-transformers",
         "bitsandbytes",
+        "accelerate",
+        "peft",
         "numpy",
         "pyvi",
         "rank-bm25",

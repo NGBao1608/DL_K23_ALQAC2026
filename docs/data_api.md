@@ -1,8 +1,8 @@
 # Official Data and Case Content API
 
-**Last checked:** 2026-07-14
+**Last checked:** 2026-07-20
 
-**Sources:** [Retrieval API](https://alqac2026-leaderboard.ngrok.app/api-docs), [task rules](https://alqac2026-leaderboard.ngrok.app/about), and organizer-provided raw files in `data/raw/`.
+**Sources:** [Retrieval API](https://alqac2026-leaderboard.ngrok.app/api-docs), [task rules](https://alqac2026-leaderboard.ngrok.app/about), [official competition website](https://sites.google.com/view/alqac2026), the live read-only [OpenAPI schema](https://alqac-api.ngrok.pro/openapi.json), and organizer-provided raw files in `data/raw/`.
 
 ## Official data files
 
@@ -20,7 +20,7 @@ verdict_label
 
 Only `case_id` and `case_query` may enter production inference. All other fields are Public Test metadata or gold annotations and may be read only by evaluation and error-analysis code.
 
-Expected private-like inference item:
+Official inference item:
 
 ```json
 {
@@ -29,7 +29,23 @@ Expected private-like inference item:
 }
 ```
 
-`Needs confirmation`: the refreshed official pages do not publish the complete new Private Test schema.
+The official competition website states that the test input contains only `case_id` and `case_query` and does not include the gold verdict, court reasoning, court decision, or gold evidence.
+
+### `ALQAC_private_test.json`
+
+The local Private Test copy is stored at `data/raw/ALQAC_private_test.json` and is intentionally git-ignored. Observed integrity contract:
+
+| Property | Observed value |
+|---|---|
+| SHA-256 | `9db83cf98ade7d19df52c60145830bebcc192e064ec830bcd285cefbfddf0252` |
+| Cases | 60 |
+| Exact fields per item | `case_id`, `case_query` |
+| Field types | Non-empty strings |
+| Duplicate Private `case_id` | 0 |
+| Public/Private `case_id` overlap | 0 |
+| Gold or prohibited inference fields | 0 |
+
+This file is the canonical local Private input for this checkout. It may be read by `load_inference_cases()` because that loader projects only `case_id` and `case_query`. It must never be edited, committed, packaged, or copied into a run artifact other than through derived identifiers and predictions allowed by the submission contract.
 
 ### `corpus_law_pub.json`
 
@@ -65,6 +81,8 @@ Interactive documentation:
 ```text
 https://alqac-api.ngrok.pro/docs
 ```
+
+The live read-only OpenAPI document reports API version `1.0.0`. Checking that schema does not call `POST /retrieve` and does not spend the team's scored retrieval budget.
 
 ### Authentication
 
@@ -133,7 +151,7 @@ Team rules:
 5. Review the proposed query count before any real API experiment.
 6. Share one team cache or evidence registry when operationally possible.
 7. Record network calls and cache hits in run artifacts, but never in `submission.json`.
-8. Require an explicit hard network-attempt cap for every non-mock run.
+8. Require an explicit hard network-attempt cap for every live run; Public model development uses cache-only with cap zero.
 9. Treat local ledger totals as a lower-bound operational record, never the official BTC count.
 
 ## Current repository behavior
@@ -141,12 +159,12 @@ Team rules:
 - `case_retrieval.py` implements throttling, bounded retry, SQLite caching, de-duplication, and safe error diagnostics.
 - The current baseline/candidate configs use exactly two deterministic queries per case: `court_decision` and normalized `case_query`.
 - `scripts/plan_api_calls.py` reports cache hits/misses without contacting the API.
-- Every non-mock runner requires `--max-network-calls`; the client refuses the next request after the cap is reached.
-- SQLite stores successful evidence responses and a safe attempt ledger containing query hashes rather than query text or credentials.
+- Every live runner requires `--max-network-calls`; cache-only never constructs the HTTP client and records zero network attempts.
+- SQLite commits a successful response and its safe attempt ledger row atomically. With external backup configured, every attempt must be backed up successfully before the next request.
 - API responses are checkpointed into prepared contexts for resume.
 - `chunk_id` is stored as a string and can carry opaque hashed values.
-- During a non-mock run, the runner emits safe `ALQAC_PROGRESS` events for cache hits, HTTP request start/completion, HTTP errors, exceptions, and scheduled retries. Events include only `case_id`, query type, attempt metadata, status metadata, and latency; they never include the query text, response text, headers, or token.
+- During retrieval, the runner emits safe `ALQAC_PROGRESS` events for cache hits/misses, HTTP request start/completion, HTTP errors, exceptions, and scheduled retries. Events include only `case_id`, query type, attempt metadata, status metadata, and latency; they never include the query text, response text, headers, or token.
 
 ## Verification status
 
-Opaque identifier storage/validation, two-query generation, cache planning, hard budgets, retries, and the local call ledger are `CPU/mock verified`. The refreshed official API path remains pending `GPU/API verified` evidence.
+Private input loading, opaque identifier storage/validation, two-query generation, cache planning, hard budgets, retries, and the local call ledger are `CPU/mock verified`. The live OpenAPI contract was checked without a scored retrieval call; the current end-to-end pipeline still lacks a completed `GPU/API verified` artifact.

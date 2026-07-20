@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
 from pathlib import Path
 
 from .schemas import InferenceCase, LawArticle, OutcomeLabel, PublicGold
+
+
+PRIVATE_INPUT_SHA256 = (
+    "9db83cf98ade7d19df52c60145830bebcc192e064ec830bcd285cefbfddf0252"
+)
 
 
 LAW_NAME_TO_ID = {
@@ -60,6 +66,30 @@ def load_inference_cases(path: str | Path) -> list[InferenceCase]:
         )
     _validate_unique_cases(cases)
     return cases
+
+
+def validate_private_input(
+    path: str | Path,
+    *,
+    expected_sha256: str = PRIVATE_INPUT_SHA256,
+    expected_cases: int = 60,
+) -> list[InferenceCase]:
+    """Validate the reviewed organizer Private input before production inference."""
+    source = Path(path)
+    payload = _read_json(source)
+    if len(payload) != expected_cases:
+        raise ValueError(f"Private input must contain exactly {expected_cases} cases")
+    for item in payload:
+        if not isinstance(item, dict) or set(item) != {"case_id", "case_query"}:
+            raise ValueError(
+                "Private input items must contain exactly case_id and case_query"
+            )
+        if not all(isinstance(item[field], str) for field in item):
+            raise ValueError("Private input fields must be strings")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    if digest != expected_sha256:
+        raise ValueError("Private input SHA-256 does not match the reviewed contract")
+    return load_inference_cases(source)
 
 
 def load_law_corpus(path: str | Path) -> list[LawArticle]:
@@ -142,4 +172,3 @@ def load_public_gold(
             raise ValueError(f"Duplicate public gold case_id: {record.case_id}")
         gold[record.case_id] = record
     return gold
-

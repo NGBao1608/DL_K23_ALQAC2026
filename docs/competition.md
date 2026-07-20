@@ -1,12 +1,13 @@
 # ALQAC 2026 Competition Requirements
 
-**Last checked:** 2026-07-14
+**Last checked:** 2026-07-20
 
 **Official sources:**
 
 - [Task and scoring rules](https://alqac2026-leaderboard.ngrok.app/about)
 - [Retrieval API](https://alqac2026-leaderboard.ngrok.app/api-docs)
 - [Submission page](https://alqac2026-leaderboard.ngrok.app/submit)
+- [Official ALQAC 2026 competition website](https://sites.google.com/view/alqac2026)
 - [ALQAC 2026 landing page](https://alqac.github.io/)
 
 This document separates current official statements from repository decisions and unresolved questions. When sources conflict, do not guess: preserve the conflict as `Needs confirmation`.
@@ -22,11 +23,11 @@ The task is **Legal Case Outcome Prediction with Evidence Retrieval**. Given a s
 The official outcome labels are:
 
 - `A_WIN` — Plaintiff wins.
-- `PARTIAL_A_WIN` — Plaintiff partially wins.
+- `PARTIAL_A_WIN` — The court partially accepts the plaintiff's claims, and the accepted portion is greater than 50%.
 - `B_WIN` — Defendant wins.
-- `PARTIAL_B_WIN` — Defendant partially wins.
+- `PARTIAL_B_WIN` — The court partially accepts the plaintiff's claims, and the accepted portion is 50% or less.
 
-Outcome evaluation is exact match over these four labels. The current rules do not define partial outcomes using numeric percentages. The older team interpretation of “more than 50%” versus “not more than 50%” is therefore `Needs confirmation`.
+Outcome evaluation is exact match over these four labels. When a case contains multiple claims, the official competition website instructs teams to focus on the main claim described in `case_query`.
 
 ## Official requirement: score
 
@@ -66,8 +67,24 @@ Case Content API calls accumulate across every run and experiment. Logs are appe
 - The upload page accepts files up to 10 MB.
 - Submission requires the organizer-issued team name and secret token.
 - The public leaderboard displays the best run per team.
-- The current limit is 20 submissions per team per 24 hours.
 - Upload is a manual team-owner action; this repository must not upload automatically.
+
+### Submission-limit conflict
+
+`Needs confirmation`: two current official organizer pages state different general limits:
+
+- the competition website allows at most **3 submissions per day**; and
+- the leaderboard rules state **20 submissions per team per 24 hours**.
+
+Until the organizers clarify the conflict, this repository uses the stricter operational limit of at most three submissions in any 24-hour period.
+
+The submission page additionally defines track-specific behavior:
+
+- Public Test may be submitted repeatedly, subject to the stricter operational limit above;
+- Private Test permits at most **3 named runs in total**;
+- every Private run name must be distinct and cannot be reused;
+- the Private submission flow performs **Check format** before final confirmation; and
+- the best Private run counts, while Private rankings remain hidden until the organizers reveal them.
 
 ## Official requirement: evidence identifiers
 
@@ -95,11 +112,12 @@ Until the organizer resolves this inconsistency:
 The organizer-provided files currently present in this repository are:
 
 - `ALQAC2026_public_test.json`: 50 labeled Public Test cases;
-- `corpus_law_pub.json`: 18 law documents containing 3,352 articles.
+- `corpus_law_pub.json`: 18 law documents containing 3,352 articles; and
+- local ignored `ALQAC_private_test.json`: 60 unlabeled Private Test cases.
 
-The current official web pages describe the input as a short Vietnamese case query and require a valid `case_id` for API retrieval. They do not publish a complete new Private Test JSON example.
+The official competition website defines test input as a JSON array containing only `case_id` and `case_query`; it explicitly excludes the gold verdict, court reasoning, court decision, and gold evidence.
 
-`Needs confirmation`: whether the refreshed Private Test release still contains only `case_id` and `case_query`.
+The local Private Test file `data/raw/ALQAC_private_test.json` conforms to that contract: 60 cases, exactly the two allowed fields, non-empty string values, no duplicate `case_id`, and no overlap with the 50 Public Test identifiers. Its integrity details are recorded in `docs/data_api.md`.
 
 ## Timeline
 
@@ -112,19 +130,21 @@ The official ALQAC landing page lists these paper and event dates, all distinct 
 | Camera-ready | 2026-09-10 |
 | Conference | 2026-11-11 to 2026-11-14 |
 
-`Needs confirmation`: Public Test, Private Test, leaderboard freeze, source-code delivery, and technical-report deadlines are not stated on the refreshed leaderboard documentation.
+`Needs confirmation`: Public Test, Private Test, leaderboard freeze, source-verification, and technical-report deadlines are not stated on the current official pages.
 
-## Restrictions and deliverables
+## Official restrictions and reproducibility
 
-The refreshed leaderboard pages do not state:
+The official competition website states:
 
-- model parameter or licensing restrictions;
-- whether proprietary model APIs are prohibited;
-- external-data or external-annotation restrictions;
-- source-code delivery requirements; or
-- technical-report delivery requirements.
+- closed or proprietary systems and non-open model APIs, including ChatGPT, GPT-4, Claude, and Gemini, are prohibited;
+- only open-weight models with fewer than 10 billion parameters are allowed;
+- online legal-database queries are permitted;
+- externally annotated datasets created specifically for legal question answering or legal entailment are prohibited; and
+- submissions that violate these rules are disregarded from the final ranking.
 
-These were present in earlier team notes but are not confirmed by the refreshed pages. They remain `Needs confirmation` and must not be presented as current official requirements without an organizer source.
+Participating teams are encouraged, but not explicitly required, to submit a short technical report describing the Case Content API retrieval strategy, law-corpus retrieval strategy, outcome model, training/fine-tuning data, and final configuration. The organizers may request source code, configuration files, or logs for verification and reproducibility.
+
+`Needs confirmation`: whether a technical report or source package becomes a mandatory deliverable, and the deadline or transfer procedure for any requested verification artifacts.
 
 ## Team implementation
 
@@ -132,7 +152,8 @@ This repository currently adopts stricter internal safeguards:
 
 - production inference receives only `case_id` and `case_query`;
 - public-only gold fields are isolated in evaluation code;
-- the current model stack uses open-weight models;
+- all pinned outcome, embedding, and reranking models are public open-weight models below 10 billion parameters;
+- proprietary model APIs and prohibited externally annotated legal datasets are excluded;
 - secrets are read from environment or notebook secret storage;
 - API responses are cached and runs are checkpointed;
 - submission validation is mandatory; and
@@ -142,10 +163,7 @@ These are team implementation decisions unless explicitly identified above as of
 
 ## Open questions summary
 
-1. What is the exact accepted shape of current `chunk_id` values?
-2. Does the refreshed Private Test contain only `case_id` and `case_query`?
-3. How should `PARTIAL_A_WIN` and `PARTIAL_B_WIN` be distinguished beyond the party description?
-4. What model, API, and external-data restrictions apply?
-5. Are source code and a technical report mandatory deliverables?
-6. What are the Public/Private Test and leaderboard deadlines?
-
+1. Will the stale sequential `chunk_id` examples be removed from the rules/API pages now that the leaderboard announces opaque hashed identifiers?
+2. Which general submission limit governs ranking eligibility: three per day or 20 per 24 hours?
+3. Are source code and a technical report mandatory deliverables, and if so, what are their deadlines?
+4. What are the Public/Private Test and leaderboard deadlines?

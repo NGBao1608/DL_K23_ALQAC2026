@@ -10,7 +10,11 @@ SUBMISSION_FIELDS = {"case_id", "prediction", "case_evidence", "law_evidence"}
 MAX_SUBMISSION_BYTES = 10 * 1024 * 1024
 
 
-def build_submission(results: list[PredictionResult]) -> list[dict]:
+def build_submission(
+    results: list[PredictionResult], law_top_k: int | None = None
+) -> list[dict]:
+    if law_top_k is not None and law_top_k <= 0:
+        raise ValueError("law_top_k must be positive")
     submission = []
     for result in results:
         if result.status != "completed" or result.prediction is None:
@@ -24,7 +28,7 @@ def build_submission(results: list[PredictionResult]) -> list[dict]:
                 ),
                 "law_evidence": [
                     {"law_id": item.law_id, "aid": item.aid}
-                    for item in _unique_law_evidence(result)
+                    for item in list(_unique_law_evidence(result))[:law_top_k]
                 ],
             }
         )

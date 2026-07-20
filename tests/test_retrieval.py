@@ -3,13 +3,14 @@ import requests
 
 from alqac2026.case_retrieval import (
     ApiBudgetExceeded,
+    CachedCaseContentClient,
     CaseContentClient,
     EvidenceQueryGenerator,
     SQLiteEvidenceCache,
     build_api_plan,
     cache_key,
 )
-from alqac2026.law_retrieval import extract_law_citations
+from alqac2026.law_retrieval import extract_law_citations, law_index_fingerprint
 from alqac2026.schemas import InferenceCase, LawArticle
 from alqac2026.law_retrieval import reciprocal_rank_fusion
 
@@ -47,6 +48,19 @@ def test_rrf_is_deterministic_and_rewards_overlap():
     ranked = reciprocal_rank_fusion([[1, 2, 3], [3, 2, 4]], rrf_k=60)
     identifiers = [identifier for identifier, _ in ranked]
     assert identifiers[:2] == [3, 2]
+
+
+def test_law_index_fingerprint_changes_with_corpus_or_model_revision():
+    articles = [LawArticle("law", 1, 1, "Nghĩa vụ thanh toán")]
+    config = {"embedding_model": "model", "embedding_revision": "rev-1"}
+    first = law_index_fingerprint(config, articles)
+    assert first == law_index_fingerprint(config, articles)
+    assert first != law_index_fingerprint(
+        {**config, "embedding_revision": "rev-2"}, articles
+    )
+    assert first != law_index_fingerprint(
+        config, [LawArticle("law", 1, 1, "Nghĩa vụ hoàn trả")]
+    )
 
 
 def test_exact_law_citations_are_extracted_in_document_order():
@@ -132,6 +146,14 @@ def test_api_retry_then_cache_hit(tmp_path):
     cache.close()
 
 
+def test_sqlite_backup_refuses_to_replace_live_database(tmp_path):
+    cache_path = tmp_path / "cache.sqlite"
+    cache = SQLiteEvidenceCache(cache_path)
+    with pytest.raises(ValueError, match="must differ"):
+        cache.backup_to(cache_path)
+    cache.close()
+
+
 def test_api_progress_events_are_safe_and_cover_retry_and_cache_hit(tmp_path):
     cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
     events = []
@@ -206,7 +228,7 @@ def test_api_strips_secret_and_redacts_403_diagnostics(tmp_path):
         == "alqac2026-api-client"
     )
     assert "secret-token" not in message
-    assert "response=Forbidden for <redacted>" in message
+    assert "response_body=<redacted>" in message
     cache.close()
 
 
@@ -338,4 +360,72 @@ def test_api_plan_counts_cache_hits_without_network_calls(tmp_path):
     assert report["cache_misses"] == 1
     assert report["approved_max_network_calls"] == 1
     assert report["known_local_cumulative_attempts"] == 0
+    cache.close()
+
+
+def test_cache_only_client_returns_hits_and_empty_misses_without_http(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    cache.put("case_1", "known", [{"chunk_id": "opaque", "text": "x"}])
+    events = []
+    client = CachedCaseContentClient(cache, progress_callback=events.append)
+    assert client.retrieve("case_1", "known", "court_decision")[0]["chunk_id"] == "opaque"
+    assert client.retrieve("case_1", "missing", "original") == []
+    assert client.network_calls == 0
+    assert client.cache_hits == 1
+    assert client.cache_misses == 1
+    assert [event["status"] for event in events] == ["cache_hit", "cache_miss"]
+    cache.close()
+
+
+def test_success_response_and_attempt_are_backed_up_atomically(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "local.sqlite")
+    backup_path = tmp_path / "drive" / "case_api.sqlite"
+    client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=1,
+        request_interval_seconds=0,
+        session=FakeSession(
+            [FakeResponse(200, {"results": [{"chunk_id": "opaque", "text": "x"}]})]
+        ),
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+        backup_path=backup_path,
+    )
+    client.retrieve("case_1", "query", query_type="original")
+    backup = SQLiteEvidenceCache(backup_path)
+    assert backup.contains("case_1", "query")
+    assert backup.known_cumulative_attempts() == 1
+    backup.close()
+    cache.close()
+
+
+def test_backup_failure_stops_before_retry(tmp_path, monkeypatch):
+    cache = SQLiteEvidenceCache(tmp_path / "local.sqlite")
+    session = FakeSession(
+        [FakeResponse(503, {}), FakeResponse(200, {"results": []})]
+    )
+    monkeypatch.setattr(
+        cache,
+        "backup_to",
+        lambda path: (_ for _ in ()).throw(OSError("drive unavailable")),
+    )
+    client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=2,
+        max_network_calls=2,
+        request_interval_seconds=0,
+        session=session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+        backup_path=tmp_path / "drive.sqlite",
+    )
+    with pytest.raises(OSError, match="drive unavailable"):
+        client.retrieve("case_1", "query", query_type="original")
+    assert len(session.calls) == 1
+    assert cache.known_cumulative_attempts() == 1
     cache.close()

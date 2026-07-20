@@ -61,6 +61,7 @@ submission.json
 
 # Private test data must not be committed
 data/raw/private_test*.json
+data/raw/*private*test*.json
 data/private/
 
 # Kaggle and Colab working artifacts

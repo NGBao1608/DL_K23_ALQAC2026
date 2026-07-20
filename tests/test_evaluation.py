@@ -1,4 +1,8 @@
-from alqac2026.evaluation import evaluate_law_rankings, evaluate_public
+from alqac2026.evaluation import (
+    evaluate_law_rankings,
+    evaluate_public,
+    select_law_top_k,
+)
 from alqac2026.schemas import (
     LawEvidence,
     OutcomeLabel,
@@ -44,3 +48,25 @@ def test_public_law_f1_excludes_cases_without_resolved_gold():
     assert metrics["law_micro_f1"] == 1.0
     assert metrics["law_evaluated_cases"] == 1
 
+
+def test_law_top_k_selection_uses_public_evaluator_and_smaller_tie_break():
+    gold = {
+        "case_1": PublicGold(
+            "case_1", OutcomeLabel.A_WIN, law_evidence=(("law", 1),)
+        )
+    }
+    results = [
+        PredictionResult(
+            "case_1",
+            OutcomeLabel.A_WIN,
+            law_evidence=[
+                LawEvidence("law", 1, "", 1.0),
+                LawEvidence("law", 2, "", 0.9),
+                LawEvidence("law", 3, "", 0.8),
+                LawEvidence("law", 4, "", 0.7),
+            ],
+        )
+    ]
+    profile = select_law_top_k(results, gold, ks=(1, 2, 3))
+    assert profile["submission_law_top_k"] == 1
+    assert profile["scores"]["1"] == 1.0

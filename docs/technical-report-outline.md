@@ -1,10 +1,10 @@
 # Technical Report Outline
 
-**Last synchronized:** 2026-07-14
+**Last synchronized:** 2026-07-20
 
 **Canonical references:** [`competition.md`](competition.md), [`pipeline.md`](pipeline.md), and [`experiments.md`](experiments.md)
 
-`Needs confirmation`: the refreshed official pages do not state whether a technical report or source-code package is mandatory, nor their deadlines. Prepare these artifacts for reproducibility without representing them as confirmed official deliverables.
+The official competition website encourages a short technical report and says organizers may request source code, configuration files, or logs for verification and reproducibility. `Needs confirmation`: whether these artifacts become mandatory and what deadlines or transfer procedure apply.
 
 Do not add scores unless a reproducible artifact and, where applicable, an official leaderboard result exist.
 
@@ -20,9 +20,10 @@ Do not add scores unless a reproducible artifact and, where applicable, an offic
 
 - Public development set statistics and field boundary.
 - Official law corpus statistics.
-- Private-like inference using only `case_id` and `case_query`.
+- Private inference over 60 cases using only `case_id` and `case_query`.
 - Separation of Public gold annotations from inference.
-- `Needs confirmation` items about refreshed Private Test shape and data restrictions.
+- Private file integrity, non-overlap, and raw-data protection.
+- Official prohibition on externally annotated legal QA/entailment datasets.
 
 ## 3. System
 
@@ -30,7 +31,8 @@ Do not add scores unless a reproducible artifact and, where applicable, an offic
 - Opaque case-evidence identifier handling.
 - BM25 and hybrid Vietnamese law retrieval.
 - Qwen3-8B NF4 prediction and structured output validation.
-- Cache, checkpoint, resume, and staged Kaggle T4 execution.
+- Open-weight, fewer-than-10B model compliance and absence of proprietary model APIs.
+- Cache-only Public evaluation, atomic cache backup, checkpoint/resume, and staged Colab T4 execution.
 
 ## 4. Experiments
 
@@ -58,3 +60,4 @@ Every result row must reference config, Git revision, model revisions, run direc
 - Run artifacts and clean-kernel replay.
 - Source bundle contents and exclusions.
 - Known limitations and unresolved organizer questions.
+- Conflicting submission limits and the stricter internal operating rule.
