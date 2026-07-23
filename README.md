@@ -114,9 +114,10 @@ duplicate Hugging Face `blobs`, then writes checkpoints and safe exports to
 `MyDrive/ALQAC2026`. `requirements-colab.txt` preserves Colab's preinstalled
 Torch/CUDA build.
 
-The dependency cell removes the unused preinstalled `gradio`, `gradio-client`, and
-`hf-gradio` UI stack before installing Transformers 4.x. This avoids its incompatible
-Hugging Face Hub requirement while keeping the final `pip check` fail-closed.
+The dependency cell records Colab's initial `pip check` state, removes the unused
+preinstalled `gradio`, `gradio-client`, and `hf-gradio` UI stack, and then installs
+Transformers 4.x. It fails closed on conflicts introduced by ALQAC while reporting
+unrelated conflicts already present in the Colab image as warnings.
 It also clears stale `alqac2026` imports after recloning and verifies that the
 package and `artifacts` module resolve from the exact source-pinned checkout.
 The source bootstrap accepts the raw GitHub URL and repairs an accidentally

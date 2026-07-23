@@ -59,6 +59,10 @@ def test_colab_notebooks_expose_only_smoke_and_full_stages():
         assert "restore_hf_model_snapshots" in text
         assert "GIT_REPO_URL = normalize_git_repo_url(GIT_REPO_URL)" in text
         assert "Git clone failed for" in text
+        assert "PIP_BASELINE_PATH = Path('/content/alqac-pip-check-baseline.json')" in text
+        assert "new_issues = sorted(after_issues - set(pip_baseline['issues']))" in text
+        assert "ALQAC dependency installation introduced new conflicts" in text
+        assert "subprocess.check_call([sys.executable, '-m', 'pip', 'check'])" not in text
 
 
 def test_public_notebook_runs_live_pipeline_and_evaluator():
