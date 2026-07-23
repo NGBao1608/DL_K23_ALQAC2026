@@ -39,6 +39,13 @@ The dependency cell therefore removes only the unused `gradio`, `gradio-client`,
 and `hf-gradio` UI stack before installing `requirements-colab.txt`; it still
 fails on every remaining new `pip check` conflict.
 
+After the editable install, the notebook clears any `alqac2026` modules retained
+by the current kernel, puts the checked-out `<project>/src` first on `sys.path`,
+invalidates Python's importer cache, and verifies that both `alqac2026` and
+`alqac2026.artifacts` resolve from the pinned commit. This provenance gate is
+required because Run All deletes and reclones `/content/alqac2026` without
+necessarily restarting the Python kernel.
+
 ## 2. CPU/mock smoke test
 
 ```bash

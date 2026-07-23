@@ -57,6 +57,16 @@ def test_colab_notebook_exposes_required_safe_run_controls():
     assert text.index("'pip', 'uninstall'") < text.index(
         "'pip', 'install', '-q', '-r', 'requirements-colab.txt'"
     )
+    assert "project_src = (PROJECT_ROOT / 'src').resolve()" in text
+    assert "module_name.startswith('alqac2026.')" in text
+    assert "sys.path.insert(0, project_src_text)" in text
+    assert "sys.path_importer_cache.pop(project_src_text, None)" in text
+    assert "importlib.invalidate_caches()" in text
+    assert "find_spec('alqac2026.artifacts')" in text
+    assert "ALQAC import provenance mismatch" in text
+    assert text.index("find_spec('alqac2026.artifacts')") < text.index(
+        "from alqac2026.artifacts import DriveArtifactLayout"
+    )
     assert "introduced new conflicts" in text
     assert "torch_version_after != pip_baseline['torch_version']" in text
 

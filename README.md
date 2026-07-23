@@ -92,6 +92,8 @@ python scripts/run_public.py \
 The dependency cell removes the unused preinstalled `gradio`, `gradio-client`, and
 `hf-gradio` UI stack before installing Transformers 4.x. This avoids its incompatible
 Hugging Face Hub requirement while keeping the final `pip check` fail-closed.
+It also clears stale `alqac2026` imports after recloning and verifies that the
+package and `artifacts` module resolve from the exact source-pinned checkout.
 
 Recommended Public order:
 
