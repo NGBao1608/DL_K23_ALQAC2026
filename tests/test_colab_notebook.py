@@ -63,6 +63,9 @@ def test_colab_notebooks_expose_only_smoke_and_full_stages():
         assert "new_issues = sorted(after_issues - set(pip_baseline['issues']))" in text
         assert "ALQAC dependency installation introduced new conflicts" in text
         assert "subprocess.check_call([sys.executable, '-m', 'pip', 'check'])" not in text
+        assert text.index("os.chdir(PROJECT_ROOT.parent)") < text.index(
+            "shutil.rmtree(PROJECT_ROOT)"
+        )
 
 
 def test_public_notebook_runs_live_pipeline_and_evaluator():
