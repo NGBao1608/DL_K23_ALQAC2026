@@ -119,6 +119,9 @@ The dependency cell removes the unused preinstalled `gradio`, `gradio-client`, a
 Hugging Face Hub requirement while keeping the final `pip check` fail-closed.
 It also clears stale `alqac2026` imports after recloning and verifies that the
 package and `artifacts` module resolve from the exact source-pinned checkout.
+The source bootstrap accepts the raw GitHub URL and repairs an accidentally
+Markdown-wrapped URL before clone; all other URL shapes fail with a clear
+validation error.
 
 Public order:
 

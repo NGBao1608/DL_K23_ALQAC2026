@@ -1,5 +1,6 @@
 import ast
 import json
+import re
 from pathlib import Path
 
 
@@ -11,6 +12,21 @@ NOTEBOOKS = {
 
 def _notebook_text(track: str) -> str:
     return NOTEBOOKS[track].read_text(encoding="utf-8")
+
+
+def _load_notebook_function(track: str, function_name: str):
+    notebook = json.loads(NOTEBOOKS[track].read_text(encoding="utf-8"))
+    for cell in notebook["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        tree = ast.parse("".join(cell["source"]))
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and node.name == function_name:
+                module = ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[]))
+                namespace = {"re": re}
+                exec(compile(module, str(NOTEBOOKS[track]), "exec"), namespace)
+                return namespace[function_name]
+    raise AssertionError(f"Missing notebook function: {function_name}")
 
 
 def test_colab_notebooks_are_clean_and_code_cells_compile():
@@ -41,6 +57,8 @@ def test_colab_notebooks_expose_only_smoke_and_full_stages():
         assert "module_name.startswith('alqac2026.')" in text
         assert "Stale package import outside pinned checkout" in text
         assert "restore_hf_model_snapshots" in text
+        assert "GIT_REPO_URL = normalize_git_repo_url(GIT_REPO_URL)" in text
+        assert "Git clone failed for" in text
 
 
 def test_public_notebook_runs_live_pipeline_and_evaluator():
@@ -84,3 +102,23 @@ def test_runtime_check_has_no_case_api_or_team_token_dependency():
     assert text.index('report["stages"]["embedding"]') < text.index(
         'report["stages"]["reranker"]'
     ) < text.index('report["stages"]["generation"]')
+
+
+def test_colab_git_url_normalizer_accepts_raw_and_markdown_urls():
+    raw = "https://github.com/NGBao1608/DL_K23_ALQAC2026.git"
+    markdown = f"[{raw}]({raw})"
+    for track in NOTEBOOKS:
+        normalize = _load_notebook_function(track, "normalize_git_repo_url")
+        assert normalize(raw) == raw
+        assert normalize(markdown) == raw
+
+
+def test_colab_git_url_normalizer_rejects_non_github_urls():
+    for track in NOTEBOOKS:
+        normalize = _load_notebook_function(track, "normalize_git_repo_url")
+        try:
+            normalize("https://example.com/repository.git")
+        except ValueError as error:
+            assert "raw https://github.com" in str(error)
+        else:
+            raise AssertionError("Non-GitHub URL was accepted")

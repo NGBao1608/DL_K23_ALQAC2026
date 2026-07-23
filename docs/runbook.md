@@ -193,6 +193,7 @@ The official competition website encourages a short technical report and says or
 | CUDA OOM during Qwen | Confirm NF4, context budget, and released retrieval models. |
 | Invalid model output | Allow one repair attempt; do not invent a fallback label. |
 | Resume identity mismatch | Use the original source/config/input or start a new run directory. |
+| Git clone command contains `[https://...](https://...)` | Use a raw GitHub URL. Current notebooks normalize this accidental Markdown wrapper before clone. |
 | Validator rejects a non-empty exact API ID | Do not upload; preserve the artifact and investigate the validator/API schema conflict. |
 | API budget smaller than cache misses | Stop before retrieval; review preflight and explicitly approve a sufficient cap. |
 | API budget exhausted during retry | Preserve cache/checkpoints; review the consumed local attempts before approving a resume budget. |
