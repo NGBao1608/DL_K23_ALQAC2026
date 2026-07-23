@@ -165,7 +165,14 @@ Status: outcome/law evaluation is `CPU/mock verified`; official scoring is not l
 
 Each run records resolved configuration, environment, API preflight, prepared contexts, predictions, API statistics, validation, metrics, errors, law selection, and a manifest containing Git/model/corpus/input identifiers. `scripts/check_runtime.py` creates the zero-API embedding/reranker/Qwen gate before live retrieval. In Colab, smoke persists one exact source commit per `RUN_ID`; full requires a completed two-case smoke gate from that commit and automatically resumes only its own full checkpoint directory.
 
-Successful API responses and prepared contexts are reused during resume. Run identity includes input, config, execution mode, limit, storage paths, selection profile, and source fingerprint. The Drive-first Colab notebook restores SQLite/model/index artifacts to local storage, checkpoints runs under track-specific Drive directories, and exports only allowlisted validated files plus SHA-256 checksums.
+Successful API responses and prepared contexts are reused during resume. Run
+identity includes input, config, execution mode, limit, storage paths,
+selection profile, and source fingerprint. The Drive-first Colab notebook
+restores SQLite and index artifacts plus materialized model snapshots to local
+storage while skipping duplicate Hugging Face blobs. It checkpoints runs under
+track-specific Drive directories and exports only allowlisted validated files
+plus SHA-256 checksums. Private input and law corpus come from the source-pinned
+private repository checkout.
 
 Notebook logic remains thin; reusable behavior belongs in `src/alqac2026`.
 

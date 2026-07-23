@@ -17,7 +17,7 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 | Implement split Drive-first Colab workflows | Separate Public evaluation from Private submission while keeping reusable logic outside notebooks | `colab_public.ipynb`, `colab_private.ipynb`, `colab_workflow.py` | Two thin notebooks exposing only smoke/full with track-separated artifacts | implemented |
 | Add zero-API runtime gate inside smoke | Prove embedding, reranker, index, and Qwen work before retrieval spend without another user-facing mode | `check_runtime.py`, candidate config, Colab helper | `runtime_check.json` with model stages and zero API attempts before two live cases | implemented |
 | Add cache-only Public mode | Evaluate model/law pipeline without adding permanent organizer calls | Runner, cache client, Public notebook | 50-case capable path with cache misses converted to empty evidence and zero HTTP | CPU/mock verified |
-| Validate and index the Private law corpus | Bind Private law evidence and index reuse to the organizer-provided corpus | Colab helper, Private notebook, Drive input | Reviewed hash, 14 laws, 2,820 articles, fingerprinted index | CPU/mock verified |
+| Validate and index the Private law corpus | Bind Private law evidence and index reuse to the organizer-provided corpus | Colab helper, Private notebook, private Git checkout | Reviewed hash, 14 laws, 2,820 articles, fingerprinted index | CPU/mock verified |
 | Verify refreshed API with two cases | Confirm auth, rate limit, response schema, opaque IDs, cache, and resume | Public notebook, Case API client | Two-case artifact with safe API stats and no repeated successful calls | Not implemented yet |
 | Verify Qwen candidate on Colab T4 | Produce a real two-case outcome artifact after the model-only gate | `candidate.yaml`, Colab notebook | Completed two-case run, valid JSON outputs, no OOM | Not implemented yet |
 | Complete Public baseline | Create a comparable 50-case BM25 + Qwen run | Public runner | Reproducible full Public run and validated candidate submission | Not implemented yet |
@@ -52,7 +52,8 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 
 1. Run Public `smoke`; it pins the source, restores/builds the Public law index, runs the zero-call model gate, and completes two live cases with cap four.
 2. Keep the Public `RUN_ID`, run Public `full`, and review Outcome Accuracy, Law Micro F1, error analysis, and `selection_profile.json`.
-3. If Public quality is acceptable, place and validate both Private input files on Drive and choose a new Private `RUN_ID`.
+3. If Public quality is acceptable, verify the source-pinned checkout contains
+   both reviewed Private files and choose a new Private `RUN_ID`.
 4. Run Private `smoke`; require two completed live cases, valid output, and verified atomic external cache backup.
 5. Keep the Private `RUN_ID`, run Private `full`, and allow automatic resume only within its separate `full/` directory.
 6. Validate complete coverage and checksums, assign a distinct Private run name, and manually use **Check format**.

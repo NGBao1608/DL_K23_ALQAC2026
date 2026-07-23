@@ -33,7 +33,9 @@ The official competition website states that the test input contains only `case_
 
 ### `ALQAC_private_test.json`
 
-The local Private Test copy is stored at `data/raw/ALQAC_private_test.json` and is intentionally git-ignored. Observed integrity contract:
+The Private Test copy is stored at `data/raw/ALQAC_private_test.json` and is
+tracked only in the verified private GitHub repository. Observed integrity
+contract:
 
 | Property | Observed value |
 |---|---|
@@ -45,7 +47,12 @@ The local Private Test copy is stored at `data/raw/ALQAC_private_test.json` and 
 | Public/Private `case_id` overlap | 0 |
 | Gold or prohibited inference fields | 0 |
 
-This file is the canonical local Private input for this checkout. It may be read by `load_inference_cases()` because that loader projects only `case_id` and `case_query`. It must never be edited, committed, packaged, or copied into a run artifact other than through derived identifiers and predictions allowed by the submission contract.
+This file is the canonical Private input for the source-pinned checkout. It may
+be read by `load_inference_cases()` because that loader projects only `case_id`
+and `case_query`. It must never be edited, included in source bundles, or copied
+into run/export artifacts other than through derived identifiers and
+predictions allowed by the submission contract. A push containing it is allowed
+only while repository visibility is verified private.
 
 ### `corpus_law_pub.json`
 
@@ -70,9 +77,9 @@ Observed document shape:
 
 ### `private_test_60_cases_extracted_corpus.json`
 
-The organizer-provided Private law corpus is stored locally at
-`data/raw/private_test_60_cases_extracted_corpus.json` and is intentionally
-git-ignored. Observed integrity contract:
+The organizer-provided Private law corpus is stored at
+`data/raw/private_test_60_cases_extracted_corpus.json` and is tracked only in
+the verified private GitHub repository. Observed integrity contract:
 
 | Property | Observed value |
 |---|---|
@@ -82,7 +89,7 @@ git-ignored. Observed integrity contract:
 
 Private law retrieval and validation must use this corpus rather than
 `corpus_law_pub.json`. The file is immutable organizer data and must never be
-committed, packaged, or copied into exports.
+included in source bundles or copied into exports.
 
 ## Case Content API
 

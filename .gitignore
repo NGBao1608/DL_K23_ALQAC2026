@@ -59,9 +59,12 @@ submissions/
 submission.json
 .submit_count.json
 
-# Private test data must not be committed
+# Organizer Private data is tracked only because the canonical GitHub repository
+# is private. Keep broad protection for any other private-test files.
 data/raw/private_test*.json
 data/raw/*private*test*.json
+!data/raw/ALQAC_private_test.json
+!data/raw/private_test_60_cases_extracted_corpus.json
 data/private/
 
 # Kaggle and Colab working artifacts

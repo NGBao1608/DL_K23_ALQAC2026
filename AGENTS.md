@@ -26,8 +26,12 @@ Read only the relevant canonical documents:
 - Production inference may consume only `case_id` and `case_query`.
 - Public-only gold fields may be read only by evaluation/error-analysis code.
 - Never use `verdict_label`, `case_fact`, `judgment_text`, `court_reasoning`, `court_verdict`, or `related_law_provisions` as inference features.
-- The local Private Test contract is `data/raw/ALQAC_private_test.json`; it must contain only `case_id` and `case_query`, must never be modified, committed, packaged, or uploaded as a repository artifact.
-- The organizer-provided Private law corpus is `data/raw/private_test_60_cases_extracted_corpus.json`; it is immutable, git-ignored, and excluded from source bundles and exports.
+- The Private Test contract is `data/raw/ALQAC_private_test.json`; it must contain only `case_id` and `case_query`.
+- `data/raw/ALQAC_private_test.json` and
+  `data/raw/private_test_60_cases_extracted_corpus.json` are immutable organizer
+  data tracked only in the verified private GitHub repository. They must remain
+  excluded from source bundles, run artifacts, and exports. Stop before push if
+  the repository is no longer private.
 
 ## API and submission safety
 
@@ -39,7 +43,8 @@ Read only the relevant canonical documents:
 - Use only open-weight models with fewer than 10 billion parameters. Proprietary models and non-open model APIs are prohibited.
 - Do not use externally annotated datasets created for legal question answering or legal entailment. Online legal-database lookup is permitted by the official rules, but every external source must be documented and must not cross the inference-data boundary.
 - Read tokens only from environment or approved secret storage. Never hardcode, print, log, commit, or serialize secrets.
-- Never modify raw official data.
+- Never modify raw official data. Before pushing tracked Private data, verify
+  the GitHub repository visibility is private.
 - Never upload a leaderboard submission automatically.
 - Do not upload mock, partial, failed, or unvalidated output.
 - A Colab `RUN_ID` pins one exact Git commit during `smoke`. Its `smoke` and

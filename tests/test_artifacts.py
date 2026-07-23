@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from alqac2026.artifacts import DriveArtifactLayout, export_run, restore_sqlite_cache
+from alqac2026.artifacts import (
+    DriveArtifactLayout,
+    export_run,
+    restore_hf_model_snapshots,
+    restore_sqlite_cache,
+)
 from alqac2026.case_retrieval import SQLiteEvidenceCache
 
 
@@ -141,3 +146,46 @@ def test_drive_layout_separates_public_and_private_runs(tmp_path):
     private = DriveArtifactLayout(Path(tmp_path), "private", "run-v1")
     assert public.run_dir != private.run_dir
     assert public.cache_backup == private.cache_backup
+
+
+def test_restore_hf_snapshots_skips_duplicate_blobs(tmp_path):
+    drive_cache = tmp_path / "drive-model-cache"
+    model = drive_cache / "hub/models--org--model"
+    snapshot = model / "snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("config")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    (model / "refs").mkdir()
+    (model / "refs/main").write_text("a" * 40)
+    (model / "blobs").mkdir()
+    (model / "blobs/duplicate").write_bytes(b"weights")
+
+    local_cache = tmp_path / "local-model-cache"
+    report = restore_hf_model_snapshots(
+        drive_cache,
+        local_cache,
+        reserve_bytes=0,
+    )
+
+    restored_model = local_cache / "hub/models--org--model"
+    assert report == {
+        "restored": True,
+        "models": 1,
+        "files": 2,
+        "bytes": 13,
+    }
+    assert (restored_model / "snapshots" / ("a" * 40) / "config.json").is_file()
+    assert (restored_model / "refs/main").read_text() == "a" * 40
+    assert not (restored_model / "blobs").exists()
+
+
+def test_restore_hf_snapshots_is_optional_when_drive_cache_is_absent(tmp_path):
+    assert restore_hf_model_snapshots(
+        tmp_path / "missing",
+        tmp_path / "local",
+    ) == {
+        "restored": False,
+        "models": 0,
+        "files": 0,
+        "bytes": 0,
+    }

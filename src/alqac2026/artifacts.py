@@ -15,6 +15,7 @@ EXPORT_FILES = (
     "manifest.json",
 )
 MAX_SUBMISSION_BYTES = 10 * 1024 * 1024
+MODEL_CACHE_RESERVE_BYTES = 10 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,11 +41,6 @@ class DriveArtifactLayout:
     @property
     def export_dir(self) -> Path:
         return self.root / "exports" / self.run_id
-
-    @property
-    def private_input(self) -> Path:
-        return self.root / "inputs" / "private" / "ALQAC_private_test.json"
-
 
 def restore_sqlite_cache(backup_path: str | Path, local_path: str | Path) -> bool:
     """Restore a verified Drive backup to local storage.
@@ -95,6 +91,61 @@ def backup_directory(local_dir: str | Path, backup_dir: str | Path) -> Path:
     target.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, target, dirs_exist_ok=True)
     return target
+
+
+def restore_hf_model_snapshots(
+    drive_cache: str | Path,
+    local_cache: str | Path,
+    *,
+    reserve_bytes: int = MODEL_CACHE_RESERVE_BYTES,
+) -> dict[str, int | bool]:
+    """Restore reusable Hugging Face snapshots without duplicate blob storage."""
+    source_hub = Path(drive_cache) / "hub"
+    target_hub = Path(local_cache) / "hub"
+    if not source_hub.is_dir():
+        return {
+            "restored": False,
+            "models": 0,
+            "files": 0,
+            "bytes": 0,
+        }
+
+    snapshot_roots = []
+    for model_dir in sorted(source_hub.glob("models--*")):
+        snapshots = model_dir / "snapshots"
+        if snapshots.is_dir():
+            snapshot_roots.append((model_dir, snapshots))
+    files = [
+        path
+        for _, snapshots in snapshot_roots
+        for path in snapshots.rglob("*")
+        if path.is_file()
+    ]
+    required_bytes = sum(path.stat().st_size for path in files)
+    target_hub.mkdir(parents=True, exist_ok=True)
+    free_bytes = shutil.disk_usage(target_hub).free
+    if free_bytes < required_bytes + reserve_bytes:
+        raise RuntimeError(
+            "Insufficient local disk to restore Drive model snapshots: "
+            f"required={required_bytes}, reserve={reserve_bytes}, free={free_bytes}"
+        )
+
+    for model_dir, _ in snapshot_roots:
+        target_model = target_hub / model_dir.name
+        for child_name in ("snapshots", "refs", ".no_exist"):
+            source_child = model_dir / child_name
+            if source_child.exists():
+                shutil.copytree(
+                    source_child,
+                    target_model / child_name,
+                    dirs_exist_ok=True,
+                )
+    return {
+        "restored": bool(snapshot_roots),
+        "models": len(snapshot_roots),
+        "files": len(files),
+        "bytes": required_bytes,
+    }
 
 
 def export_run(run_dir: str | Path, export_dir: str | Path) -> Path:

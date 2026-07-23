@@ -127,21 +127,22 @@ FinalScore. Public upload remains optional and manual.
 
 ## 5. Private live inference
 
-Place both immutable files in `MyDrive/ALQAC2026/inputs/private/`:
+The source-pinned private GitHub checkout must contain both immutable files:
 
 | File | Reviewed contract |
 |---|---|
 | `ALQAC_private_test.json` | SHA-256 `9db83cf98ade7d19df52c60145830bebcc192e064ec830bcd285cefbfddf0252`; 60 unique two-field cases |
 | `private_test_60_cases_extracted_corpus.json` | SHA-256 `9d79379e017ce346cf143a71fa82f5170a755c33a0341048c9baacb28c6119b5`; 14 laws and 2,820 articles |
 
-Neither file may enter Git, source bundles, or exports. Set `PUBLIC_RUN_ID` to
-the successful Public full run so Private reads only the selected scalar from
+Both files are permitted only in the verified private repository and may not
+enter source bundles, run artifacts, or exports. Set `PUBLIC_RUN_ID` to the
+successful Public full run so Private reads only the selected scalar from
 `runs/public/<PUBLIC_RUN_ID>/full/selection_profile.json`.
 
 Run:
 
 1. `STAGE='smoke'` with a new Private `RUN_ID`. The notebook validates both
-   Private files, builds or restores an index fingerprinted from the Private
+   source-pinned Private files, builds or restores an index fingerprinted from the Private
    law corpus, runs the zero-call model gate, and predicts exactly two live
    cases with cap four. Never upload this limited output.
 2. Keep the same Private `RUN_ID`, set `STAGE='full'`, and run all 60 cases.

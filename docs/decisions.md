@@ -98,7 +98,11 @@ Until written organizer clarification is recorded, the team follows the stricter
 
 **Status:** Accepted and `CPU/mock verified`
 
-The canonical local Private input is `data/raw/ALQAC_private_test.json`. Its observed contract is 60 unique cases containing exactly non-empty string `case_id` and `case_query` fields. The file is raw organizer data: it is immutable, git-ignored, excluded from source bundles, and never used as a source of gold inference features.
+The canonical Private input is `data/raw/ALQAC_private_test.json`. Its observed
+contract is 60 unique cases containing exactly non-empty string `case_id` and
+`case_query` fields. The input and Private law corpus are immutable organizer
+data tracked only in the verified private repository. They remain excluded from
+source bundles and exports and are never used as gold inference features.
 
 ## D-012: Split Drive-first Colab smoke/full workflows
 
@@ -114,6 +118,9 @@ directory. A new `RUN_ID` is required to adopt newer code.
 Public live retrieval requires explicit approval and produces local outcome/law
 evaluation. Private uses the organizer-provided Private law corpus and the
 Public full run's selected law top-k scalar, but never reads Public gold.
+Private input and corpus are loaded from the source-pinned private checkout.
+Colab restores Drive model snapshots to local storage without copying duplicate
+Hugging Face blob objects.
 Successful live responses, the attempt ledger, and pending-backup state share
 one transaction; a resumed client repairs pending backup before any cache hit or
 request. Validation and manifest bind the exact submission hash and byte length

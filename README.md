@@ -38,7 +38,7 @@ Official participation rules allow only open-weight models with fewer than 10 bi
 
 ```text
 configs/            Baseline and candidate configurations
-data/raw/           Organizer data; the local Private Test file is git-ignored
+data/raw/           Organizer data; Private files require a private repository
 src/alqac2026/      Production package
 scripts/            CLI entry points
 notebooks/          Thin Kaggle/Colab orchestration
@@ -109,7 +109,8 @@ branch code.
 `GITHUB_TOKEN` is required for a private repository, `ALQAC_TEAM_TOKEN` is
 required for either live notebook, and `HF_TOKEN` is optional. The workflow
 restores the shared SQLite cache and fingerprinted law index to local Colab
-storage, then writes checkpoints and safe exports to
+storage. It also restores model snapshots from `model_cache` while excluding
+duplicate Hugging Face `blobs`, then writes checkpoints and safe exports to
 `MyDrive/ALQAC2026`. `requirements-colab.txt` preserves Colab's preinstalled
 Torch/CUDA build.
 
@@ -127,14 +128,18 @@ Public order:
 3. Review Outcome Accuracy, Law Micro F1, Recall@5, error analysis, and
    `selection_profile.json`.
 
-For Private, place both immutable organizer files under
-`MyDrive/ALQAC2026/inputs/private/`: `ALQAC_private_test.json` and
-`private_test_60_cases_extracted_corpus.json`. Set the successful Public
-`RUN_ID` so Private can read
+For Private, the source-pinned checkout reads the immutable
+`data/raw/ALQAC_private_test.json` and
+`data/raw/private_test_60_cases_extracted_corpus.json` files tracked in the
+private repository. Set the successful Public `RUN_ID` so Private can read
 `runs/public/<RUN_ID>/full/selection_profile.json`. Run Private smoke first,
 then keep the same Private `RUN_ID` for full. Smoke uses at most four network
 attempts; full persists a budget equal to current cache misses plus the selected
 retry reserve.
+
+The two Private files must never enter the organizer source bundle or exported
+submission artifacts. Before any push containing them, verify repository
+visibility remains private.
 
 The validator accepts exact opaque API identifiers without inferring `_chunk_` or `_seg_` prefixes. Fine-tuning is not part of the production path; an optional `--adapter-path` can load a separately approved LoRA adapter.
 

@@ -95,6 +95,11 @@ gate on the same commit and automatically resumes its own full checkpoints.
 artifacts. SQLite/model/index working copies stay local while reusable
 artifacts are backed by Drive.
 
+Model-cache restoration copies only revision snapshots, refs, and negative
+cache metadata. It intentionally skips Hugging Face `blobs` because Drive
+backups already contain materialized snapshot files and copying both would
+duplicate model storage locally.
+
 Each run records:
 
 - resolved config and environment;

@@ -40,6 +40,7 @@ def test_colab_notebooks_expose_only_smoke_and_full_stages():
         assert "('gradio', 'gradio-client', 'hf-gradio')" in text
         assert "module_name.startswith('alqac2026.')" in text
         assert "Stale package import outside pinned checkout" in text
+        assert "restore_hf_model_snapshots" in text
 
 
 def test_public_notebook_runs_live_pipeline_and_evaluator():
@@ -60,6 +61,11 @@ def test_private_notebook_uses_private_inputs_without_evaluator():
     assert "run_private_stage" in text
     assert "ALQAC_private_test.json" in text
     assert "private_test_60_cases_extracted_corpus.json" in text
+    assert "PROJECT_ROOT / 'data/raw/ALQAC_private_test.json'" in text
+    assert "DRIVE_ROOT / 'inputs/private/ALQAC_private_test.json'" not in text
+    assert text.index("['git', 'clone'") < text.index(
+        "for required in (PRIVATE_INPUT, PRIVATE_CORPUS)"
+    )
     assert "full/selection_profile.json" in text
     assert "ALQAC_TEAM_TOKEN" in text
     assert "metrics.json" not in text

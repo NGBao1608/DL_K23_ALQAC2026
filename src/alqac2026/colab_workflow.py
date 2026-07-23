@@ -83,8 +83,9 @@ def run_private_stage(
 ) -> dict[str, Any]:
     """Run one source-pinned Private smoke/full stage and validate submission."""
     drive = Path(drive_root)
-    private_input = drive / "inputs/private/ALQAC_private_test.json"
-    private_corpus = drive / "inputs/private" / PRIVATE_CORPUS_FILENAME
+    root = Path(repo_root)
+    private_input = root / "data/raw/ALQAC_private_test.json"
+    private_corpus = root / "data/raw" / PRIVATE_CORPUS_FILENAME
     validate_private_input(private_input)
     _validate_private_corpus(private_corpus)
     selection_profile = (
@@ -102,7 +103,7 @@ def run_private_stage(
         track="private",
         stage=stage,
         run_id=run_id,
-        repo_root=Path(repo_root),
+        repo_root=root,
         drive_root=drive,
         local_root=Path(local_root),
         config_path=Path(config_path),
