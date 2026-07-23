@@ -35,7 +35,12 @@ E_i = max(0, 1 − max(0, c_i − 2·n_i) / (3·n_i))
 
 Case Content API calls receive full efficiency through `2·n_i` calls and decay to zero at `5·n_i`. The organizer obtains `c_i` from append-only server logs.
 
-Critical rule: calls accumulate across every Public and Private run and are never reset. Real API experiments must use a reviewed team budget and reuse cached successful responses.
+Critical rule: calls accumulate for each `case_id` across runs and are never
+reset. The reviewed Public and Private identifiers are disjoint, so Public
+calls should not directly increase a Private case's `c_i`. `Needs confirmation`:
+whether any additional team-wide cross-track accounting exists. Real API
+experiments must use a reviewed team budget and reuse cached successful
+responses.
 
 ## Submission
 

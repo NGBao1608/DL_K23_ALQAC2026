@@ -52,9 +52,18 @@ Where:
 
 `PenalizedCaseRecall` is case-evidence recall multiplied by this efficiency factor. Teams do not submit `c_i`; the organizer calculates it from server logs.
 
-### Critical clarification: calls are cumulative
+### Critical clarification: calls are cumulative per case
 
-Case Content API calls accumulate across every run and experiment. Logs are append-only and are not reset between Public Test and Private Test activity. Public experimentation can therefore reduce the efficiency component of later Private submissions. Every real API call must be treated as part of a shared team budget.
+Case Content API calls accumulate across every run and experiment, and logs are
+append-only. The official formula defines `c_i` per case. The reviewed Public
+and Private files have zero overlapping `case_id` values, so the current
+working interpretation is that Public calls do not directly increase a Private
+case's `c_i`.
+
+`Needs confirmation`: the official pages do not explicitly state whether any
+additional team-wide cross-track accounting is applied despite distinct case
+identifiers. Every real API call therefore remains part of a reviewed,
+cache-backed team budget.
 
 ## Official requirement: submission and leaderboard
 
@@ -167,3 +176,6 @@ These are team implementation decisions unless explicitly identified above as of
 2. Which general submission limit governs ranking eligibility: three per day or 20 per 24 hours?
 3. Are source code and a technical report mandatory deliverables, and if so, what are their deadlines?
 4. What are the Public/Private Test and leaderboard deadlines?
+5. With disjoint Public and Private `case_id` values, are API calls penalized
+   only through each exact case's `c_i`, or is any additional cross-track
+   team-level accounting applied?

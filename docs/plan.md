@@ -1,6 +1,6 @@
 # ALQAC 2026 Work Plan
 
-**Last updated:** 2026-07-20
+**Last updated:** 2026-07-23
 
 Official requirements and open questions are tracked in `docs/competition.md`. No task may be marked complete without the expected artifact or reproducible evidence.
 
@@ -14,9 +14,10 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 | Synchronize current official contracts | Record partial-label definitions, model/data restrictions, quota conflict, and Private submission flow | `AGENTS.md`, canonical docs, legacy views | Cross-referenced English documentation with unresolved conflicts marked `Needs confirmation` | implemented |
 | Protect and validate Private Test input | Establish the exact local path, schema, integrity, and packaging boundary | `data/raw/ALQAC_private_test.json`, `.gitignore`, configs, data loader | 60 unique two-field cases; file ignored and config paths aligned | CPU/mock verified |
 | Establish a shared API-call budget | Protect Penalized Case Recall because calls accumulate permanently | Case retrieval config, runbook, team evidence registry | Two-query policy, preflight, hard cap, local ledger, and external cache workflow | CPU/mock verified |
-| Implement Drive-first Colab runner | Unify Public and Private bootstrap, artifacts, resume, and export without notebook-local RAG logic | `colab_rag.ipynb`, artifact helpers | One thin notebook with static validation and track-separated Drive paths | implemented |
-| Add zero-API runtime gate | Prove embedding, reranker, index, and Qwen work before retrieval spend | `check_runtime.py`, candidate config | `runtime_check.json` with model stages and zero API attempts | implemented |
+| Implement split Drive-first Colab workflows | Separate Public evaluation from Private submission while keeping reusable logic outside notebooks | `colab_public.ipynb`, `colab_private.ipynb`, `colab_workflow.py` | Two thin notebooks exposing only smoke/full with track-separated artifacts | implemented |
+| Add zero-API runtime gate inside smoke | Prove embedding, reranker, index, and Qwen work before retrieval spend without another user-facing mode | `check_runtime.py`, candidate config, Colab helper | `runtime_check.json` with model stages and zero API attempts before two live cases | implemented |
 | Add cache-only Public mode | Evaluate model/law pipeline without adding permanent organizer calls | Runner, cache client, Public notebook | 50-case capable path with cache misses converted to empty evidence and zero HTTP | CPU/mock verified |
+| Validate and index the Private law corpus | Bind Private law evidence and index reuse to the organizer-provided corpus | Colab helper, Private notebook, Drive input | Reviewed hash, 14 laws, 2,820 articles, fingerprinted index | CPU/mock verified |
 | Verify refreshed API with two cases | Confirm auth, rate limit, response schema, opaque IDs, cache, and resume | Public notebook, Case API client | Two-case artifact with safe API stats and no repeated successful calls | Not implemented yet |
 | Verify Qwen candidate on Colab T4 | Produce a real two-case outcome artifact after the model-only gate | `candidate.yaml`, Colab notebook | Completed two-case run, valid JSON outputs, no OOM | Not implemented yet |
 | Complete Public baseline | Create a comparable 50-case BM25 + Qwen run | Public runner | Reproducible full Public run and validated candidate submission | Not implemented yet |
@@ -30,7 +31,7 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 | Task name | Purpose | Related files/modules | Expected output | Current status |
 |---|---|---|---|---|
 | Compare BM25 and hybrid retrieval | Measure whether dense retrieval, citation expansion, and reranking improve law evidence | Law retriever, comparison script | Same-input Recall@5/10, Micro Law F1, runtime comparison | Not implemented yet |
-| Optimize query allocation | Improve case recall without wasting permanent API calls | Query generator, cached evidence registry | Two-query live policy plus zero-network Public development | CPU/mock verified |
+| Optimize query allocation | Improve case recall without wasting permanent API calls | Query generator, cached evidence registry | Two-query live policy, shared cache, and reviewed Public/Private budgets | CPU/mock verified |
 | Analyze outcome errors | Reduce confusion among four outcome labels | Public metrics/errors artifacts | Label confusion and case-level error categories | Not implemented yet |
 | Tune outcome prompt safely | Improve accuracy without data leakage | Predictor/config | Baseline versus `decision_first_v2` comparison on private-like Public input | Not implemented yet |
 | Evaluate evidence selection | Improve grounding within the fixed context budget | Token-aware context, law top-k profile | Public Micro Law F1 selection from top-k 3–10 without inference leakage | CPU/mock verified |
@@ -49,11 +50,11 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 
 ## Execution order
 
-1. Run the Colab model-only gate and persist the fingerprinted law index without loading the organizer token.
-2. Complete a two-case then 50-case Public `cache-only` run; require zero network attempts and persist `selection_profile.json`.
-3. Keep the `RUN_ID` source pin from the passing runtime gate through smoke/full/resume and validate the canonical 60-case Private input on Drive.
-4. Review the two-query preflight, run two Private cases with cap four, and verify atomic external cache backup.
-5. Run full Private in a new directory using smoke cache and a cap of current misses plus the approved retry reserve.
-6. Validate complete coverage, export checksums, assign a distinct Private run name, and manually use **Check format**.
+1. Run Public `smoke`; it pins the source, restores/builds the Public law index, runs the zero-call model gate, and completes two live cases with cap four.
+2. Keep the Public `RUN_ID`, run Public `full`, and review Outcome Accuracy, Law Micro F1, error analysis, and `selection_profile.json`.
+3. If Public quality is acceptable, place and validate both Private input files on Drive and choose a new Private `RUN_ID`.
+4. Run Private `smoke`; require two completed live cases, valid output, and verified atomic external cache backup.
+5. Keep the Private `RUN_ID`, run Private `full`, and allow automatic resume only within its separate `full/` directory.
+6. Validate complete coverage and checksums, assign a distinct Private run name, and manually use **Check format**.
 7. Record official metrics and promote a final config only with reproducible evidence.
 8. Reproduce from a clean Colab kernel, package source, and complete the encouraged technical report.

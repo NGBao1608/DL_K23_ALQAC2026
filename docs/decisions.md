@@ -20,7 +20,7 @@ The exact string returned by the Case Content API is the only valid identifier s
 
 Official call counts accumulate across all runs and affect Penalized Case Recall. Real API calls require a reviewed purpose, successful responses must be cached, and experiments should reuse a shared evidence registry whenever possible.
 
-The live baseline/candidate policy uses exactly two queries per case (`court_decision` and normalized `case_query`). Every live run requires an explicit network-attempt cap. Public development defaults to `cache-only` with zero network attempts. A preflight report must fit inside the live cap, and Colab keeps a local working database with fail-closed external backup.
+The live baseline/candidate policy uses exactly two queries per case (`court_decision` and normalized `case_query`). Every live run requires an explicit network-attempt cap. Public quality evaluation may use live retrieval only after explicit approval; low-level `cache-only` remains available for zero-call diagnostics. A preflight report must fit inside the live cap, and Colab keeps a local working database with fail-closed external backup.
 
 Rejected alternatives:
 
@@ -100,10 +100,35 @@ Until written organizer clarification is recorded, the team follows the stricter
 
 The canonical local Private input is `data/raw/ALQAC_private_test.json`. Its observed contract is 60 unique cases containing exactly non-empty string `case_id` and `case_query` fields. The file is raw organizer data: it is immutable, git-ignored, excluded from source bundles, and never used as a source of gold inference features.
 
-## D-012: Drive-first Colab and zero-call Public development
+## D-012: Split Drive-first Colab smoke/full workflows
 
 **Status:** Accepted and `CPU/mock verified`
 
-`notebooks/colab_rag.ipynb` is the canonical Public/Private orchestration entry point. `GITHUB_TOKEN` is required for private-repository cloning, `HF_TOKEN` is optional, and `ALQAC_TEAM_TOKEN` is read only for Private live execution. The first runtime gate for a `RUN_ID` resolves and persists an exact `TuanAnh` commit; smoke, full, and resume detach at that commit, and a new `RUN_ID` is required to adopt newer code. The notebook keeps source execution thin, restores fingerprinted index/cache artifacts from Google Drive, runs a model-only gate before reading the organizer token, separates smoke/full directories, and exports only allowlisted validated files.
+`notebooks/colab_public.ipynb` is the canonical Public evaluation entry point and
+`notebooks/colab_private.ipynb` is the canonical Private submission entry point.
+Both expose only `smoke` and `full`. Smoke pins an exact Git commit, runs the
+zero-API model gate, and then runs two live cases. Full requires the passing
+smoke gate on that commit and automatically resumes only its own checkpoint
+directory. A new `RUN_ID` is required to adopt newer code.
 
-Public runs use the real embedding/reranker/Qwen stack in `cache-only` mode and may not create new Case Content API calls. Private live success records, the attempt ledger, and pending-backup state share one transaction; a resumed client repairs pending backup before any cache hit or request. Validation and manifest bind the exact submission hash and byte length before export. LoRA loading is supported as an optional interface, but Public gold is not enabled as fine-tuning data without a future organizer-confirmed contract change.
+Public live retrieval requires explicit approval and produces local outcome/law
+evaluation. Private uses the organizer-provided Private law corpus and the
+Public full run's selected law top-k scalar, but never reads Public gold.
+Successful live responses, the attempt ledger, and pending-backup state share
+one transaction; a resumed client repairs pending backup before any cache hit or
+request. Validation and manifest bind the exact submission hash and byte length
+before export. LoRA loading remains optional, and Public gold is not enabled as
+fine-tuning data without a future organizer-confirmed contract change.
+
+## D-013: Interpret API penalty per exact case identifier
+
+**Status:** Accepted with `Needs confirmation`
+
+The official formula defines `c_i` for each case, and the reviewed Public and
+Private inputs have zero overlapping `case_id` values. The working
+interpretation is therefore that Public calls do not directly increase a
+Private case's `c_i`, even though logs remain append-only across all runs.
+Whether the organizer applies any additional team-wide cross-track accounting
+is not explicitly documented and requires organizer confirmation. Public live
+runs remain budgeted and cached because they still affect Public scoring and
+consume shared operational capacity.

@@ -1,6 +1,6 @@
 # ALQAC 2026 Runbook
 
-**Last synchronized:** 2026-07-20
+**Last synchronized:** 2026-07-23
 
 **Canonical references:** [`competition.md`](competition.md), [`data_api.md`](data_api.md), and [`submission.md`](submission.md)
 
@@ -68,67 +68,91 @@ python scripts/validate_submission.py \
   --limit 2
 ```
 
-## 3. Colab model-only gate
+## 3. Canonical Colab stages
 
-Use `notebooks/colab_rag.ipynb` on one Google Colab T4 session. Before Run All, configure `GITHUB_TOKEN` for read-only private-repository access. `HF_TOKEN` is optional and only improves Hugging Face download reliability. Configure `ALQAC_TEAM_TOKEN` before a Private live run; Public cache-only stages do not read it. The notebook mounts `MyDrive/ALQAC2026`, resolves the current `TuanAnh` head during the first runtime gate for a `RUN_ID`, persists the exact commit SHA, restores the cache/index, and runs with:
+The user-facing Colab contract has only two stages:
 
 ```python
-TRACK = "public"
-RUN_MODE = "runtime_check"
-EXECUTION_MODE = "cache-only"
+STAGE = "smoke"  # smoke | full
+RUN_ID = "one-stable-experiment-id"
 ```
 
-`scripts/check_runtime.py` must load and execute embedding, reranker, and Qwen sequentially, write `runtime_check.json` with `status=PASS`, and report zero ALQAC API attempts. Do not proceed to live retrieval if any model download, CUDA allocation, index, adapter, or generation check fails.
+Use `notebooks/colab_public.ipynb` for Public and
+`notebooks/colab_private.ipynb` for Private. Configure `GITHUB_TOKEN` for
+read-only private-repository access and `ALQAC_TEAM_TOKEN` for live retrieval.
+`HF_TOKEN` is optional and only improves Hugging Face download reliability.
 
-The same `RUN_ID` must be kept for its runtime gate, two-case smoke, full run,
-and resume. Later stages detach at the persisted commit and fail if the runtime
-gate or smoke artifact belongs to another commit. Create a new `RUN_ID` to test
-newer branch code.
+Smoke performs all safety gates in one operation:
 
-## 4. Public cache-only validation
+1. resolve the selected branch and persist its exact commit in
+   `source_pin.json`;
+2. restore the shared SQLite cache and the fingerprinted law index;
+3. run embedding, reranker, and Qwen through `scripts/check_runtime.py` with
+   zero Case Content API attempts; and
+4. run exactly two live cases with a hard cap of four network attempts.
 
-Public API experimentation is disabled because organizer logs are append-only across Public and Private activity. Run two cases first, then all 50 cases with the same source-pinned `RUN_ID`:
+Full requires `runtime_check.json` and `smoke_gate.json` from the same pinned
+commit. It uses its own `full/` directory and automatically resumes that
+directory after interruption. Smoke checkpoints are never promoted into the
+full prediction set; only the shared evidence cache and law index are reused.
+Create a new `RUN_ID` to adopt newer source code or a different workflow
+configuration.
 
-```bash
-python scripts/run_public.py \
-  --config configs/candidate.yaml \
-  --execution-mode cache-only \
-  --resume-run outputs/public_candidate_full \
-  --cache-db cache/case_api.sqlite \
-  --law-index-dir cache/law_index \
-  --max-network-calls 0
-```
+## 4. Public quality evaluation
 
-Cache hits preserve previously retrieved exact evidence; misses produce an empty `case_evidence` list and never instantiate the HTTP client. Require 50 completed predictions, zero network attempts, `validation=PASS`, Outcome Accuracy, Law Micro F1, and `selection_profile.json`. The evaluator tries submission law top-k values 3 through 10, maximizes Public Micro Law F1, and breaks ties toward the smaller list.
+Public quality evaluation needs real case evidence, so the canonical Public
+notebook uses live retrieval. Set `APPROVE_PUBLIC_API_CALLS=True` only after
+reviewing the two-query policy and budget. The reviewed Public and Private files
+have zero overlapping `case_id` values. Because the official formula defines
+the penalty per case, Public calls should not directly increase a Private
+case's `c_i`; `Needs confirmation`: whether the organizer applies any
+additional team-wide cross-track accounting.
 
-This validates GPU inference, law retrieval, resume, formatting, and outcome/law metrics. It does not estimate official Case Recall or FinalScore. A Public upload remains optional and manual.
+Run:
 
-## 5. Private live run
+1. `STAGE='smoke'` with a new Public `RUN_ID`; require two completed cases,
+   `validation=PASS`, a passing zero-call model gate, and no more than four
+   network attempts.
+2. Keep the same `RUN_ID`, set `STAGE='full'`, and run all 50 cases. The first
+   full preflight persists `full_budget.json` as current cache misses plus the
+   selected retry reserve.
+3. Require 50 completed predictions, `validation=PASS`, Outcome Accuracy, Law
+   Micro F1, Recall@5, error analysis, and `selection_profile.json`.
 
-The canonical file has SHA-256 `9db83cf98ade7d19df52c60145830bebcc192e064ec830bcd285cefbfddf0252` and 60 unique objects containing exactly `case_id` and `case_query`. Place it at `MyDrive/ALQAC2026/inputs/private/ALQAC_private_test.json`; never copy it into Git, source bundles, or exports.
+The evaluator reads Public gold only after prediction. It tests submission law
+top-k values 3 through 10, maximizes Public Micro Law F1, and breaks ties toward
+the smaller list. The current Public data lacks gold case `chunk_id`, so local
+evaluation cannot report official Case Recall, Penalized Case Recall, or
+FinalScore. Public upload remains optional and manual.
 
-Set `TRACK='private'`, `EXECUTION_MODE='live'`, a new `RUN_ID`, and the Public `selection_profile.json`. Complete the model-only gate to pin and verify one exact commit before the organizer token is read or exported to the runner. Keep that `RUN_ID` for smoke, full, and resume.
+## 5. Private live inference
 
-Run a two-case smoke in `<RUN_ID>-smoke` with hard cap four. Each success records the response, attempt, and pending-backup marker atomically, then publishes a verified SQLite backup to Drive before another request is allowed. A resumed live client must repair any pending backup before serving a cache hit or sending a request. Never upload the limited output.
+Place both immutable files in `MyDrive/ALQAC2026/inputs/private/`:
 
-Run all 60 cases in a different directory. Reuse the smoke cache; approve current cache misses plus at most four retry attempts. If that reserve is exhausted, stop and require an explicit new cap before resume. Do not resume the limited run as full.
+| File | Reviewed contract |
+|---|---|
+| `ALQAC_private_test.json` | SHA-256 `9db83cf98ade7d19df52c60145830bebcc192e064ec830bcd285cefbfddf0252`; 60 unique two-field cases |
+| `private_test_60_cases_extracted_corpus.json` | SHA-256 `9d79379e017ce346cf143a71fa82f5170a755c33a0341048c9baacb28c6119b5`; 14 laws and 2,820 articles |
 
-Equivalent CLI:
+Neither file may enter Git, source bundles, or exports. Set `PUBLIC_RUN_ID` to
+the successful Public full run so Private reads only the selected scalar from
+`runs/public/<PUBLIC_RUN_ID>/full/selection_profile.json`.
 
-```bash
-python scripts/run_private.py \
-  --config configs/candidate.yaml \
-  --input data/raw/ALQAC_private_test.json \
-  --execution-mode live \
-  --resume-run submissions/private_candidate_full \
-  --cache-db cache/case_api.sqlite \
-  --cache-backup-db /approved/external/case_api.sqlite \
-  --law-index-dir cache/law_index \
-  --selection-profile /approved/public/selection_profile.json \
-  --max-network-calls APPROVED_PRIVATE_BUDGET
-```
+Run:
 
-Require exactly 60 completed cases, `validation=PASS`, exact opaque API identifiers, corpus-valid `{law_id, aid}`, a file below 10 MB, and a submission SHA-256/byte length that match both `validation.json` and `manifest.json`. Export rechecks these bindings and the actual JSON case count.
+1. `STAGE='smoke'` with a new Private `RUN_ID`. The notebook validates both
+   Private files, builds or restores an index fingerprinted from the Private
+   law corpus, runs the zero-call model gate, and predicts exactly two live
+   cases with cap four. Never upload this limited output.
+2. Keep the same Private `RUN_ID`, set `STAGE='full'`, and run all 60 cases.
+   The full run reuses the shared API cache, persists its own budget, and
+   automatically resumes its own checkpoints after interruption.
+3. Require 60 completed cases, `validation=PASS`, exact opaque API identifiers,
+   corpus-valid `{law_id, aid}`, a file below 10 MB, and matching submission
+   SHA-256/byte length in validation and manifest.
+
+Private has no local outcome or evidence labels, so the notebook does not run
+the Public evaluator. It exports only the complete validated full submission.
 
 ## 6. Manual leaderboard submission
 

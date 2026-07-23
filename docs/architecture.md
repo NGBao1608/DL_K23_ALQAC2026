@@ -1,6 +1,6 @@
 # Architecture — Synchronized Legacy View
 
-**Last synchronized:** 2026-07-20
+**Last synchronized:** 2026-07-23
 
 **Canonical source:** [`pipeline.md`](pipeline.md)
 
@@ -36,7 +36,10 @@ Status: `CPU/mock verified`.
 
 ## Case evidence stage
 
-Live production retrieval uses exactly two deterministic queries (`court_decision` and normalized `case_query`). Public development uses zero-network `cache-only`: cache hits are reused and misses return empty evidence without constructing an HTTP client.
+Live production retrieval uses exactly two deterministic queries
+(`court_decision` and normalized `case_query`). The canonical Public quality
+workflow uses live retrieval after explicit approval; low-level zero-network
+`cache-only` remains available for diagnostics.
 
 The official call count is permanent across runs. Live preflight, a hard network cap, and cache/checkpoint reuse are therefore part of scoring safety. A successful response, ledger row, and pending-backup marker share one transaction. Every attempt is backed up to external SQLite before the next request; a new live client repairs pending state before any cache hit or request, and backup failure stops the run.
 
@@ -83,7 +86,14 @@ Public evaluation supports Outcome Accuracy, Micro Law Evidence F1, law Recall@5
 
 ## Runtime and artifacts
 
-`scripts/check_runtime.py` loads embedding, reranker, and Qwen before any live request. The first runtime gate for a Colab `RUN_ID` pins one exact Git commit, and smoke/full/resume detach at that commit. Retrieval contexts are then prepared before Qwen loads for the run so retrieval GPU memory can be released. The Drive-first Colab notebook stores track-specific checkpoints and safe exports while SQLite/model/index working copies stay local.
+The canonical Colab workflow exposes only `smoke` and `full`. Smoke pins one
+exact Git commit, runs `scripts/check_runtime.py` to load embedding, reranker,
+and Qwen before any live request, then predicts two cases. Full requires that
+gate on the same commit and automatically resumes its own full checkpoints.
+`colab_public.ipynb` stores Public evaluation artifacts;
+`colab_private.ipynb` uses the Private law corpus and stores submission
+artifacts. SQLite/model/index working copies stay local while reusable
+artifacts are backed by Drive.
 
 Each run records:
 
@@ -110,5 +120,6 @@ Notebook code remains thin; reusable behavior belongs in `src/alqac2026`.
 | `submission.py` | Submission builder and local validator |
 | `runner.py` | Staged execution, resume, and artifacts |
 | `artifacts.py` | Drive layout, cache restore, directory sync, and safe export |
+| `colab_workflow.py` | Source-pinned smoke/full orchestration for Public and Private |
 
 Implementation priorities are maintained in [`plan.md`](plan.md); team choices and rejected alternatives are maintained in [`decisions.md`](decisions.md).

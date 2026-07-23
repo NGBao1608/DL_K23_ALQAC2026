@@ -1,6 +1,6 @@
 # Official Data and Case Content API
 
-**Last checked:** 2026-07-20
+**Last checked:** 2026-07-23
 
 **Sources:** [Retrieval API](https://alqac2026-leaderboard.ngrok.app/api-docs), [task rules](https://alqac2026-leaderboard.ngrok.app/about), [official competition website](https://sites.google.com/view/alqac2026), the live read-only [OpenAPI schema](https://alqac-api.ngrok.pro/openapi.json), and organizer-provided raw files in `data/raw/`.
 
@@ -67,6 +67,22 @@ Observed document shape:
 ```
 
 `aid` is the corpus article identifier. It is not the list position, an article number inferred from text, or a free-text citation.
+
+### `private_test_60_cases_extracted_corpus.json`
+
+The organizer-provided Private law corpus is stored locally at
+`data/raw/private_test_60_cases_extracted_corpus.json` and is intentionally
+git-ignored. Observed integrity contract:
+
+| Property | Observed value |
+|---|---|
+| SHA-256 | `9d79379e017ce346cf143a71fa82f5170a755c33a0341048c9baacb28c6119b5` |
+| Law documents | 14 |
+| Articles | 2,820 |
+
+Private law retrieval and validation must use this corpus rather than
+`corpus_law_pub.json`. The file is immutable organizer data and must never be
+committed, packaged, or copied into exports.
 
 ## Case Content API
 
@@ -140,7 +156,12 @@ Infrastructure error pages from ngrok are not Case API JSON responses. Log only 
 
 ## Permanent call accounting
 
-The organizer counts every Case Content API call ever made by the team for each case, across Public and Private runs. Logs are not reset.
+The organizer counts every Case Content API call ever made by the team for each
+case. Logs are not reset. The reviewed Public and Private inputs have zero
+overlapping `case_id` values. Because the published formula defines `c_i` per
+case, Public calls should not directly increase Private `c_i`. `Needs
+confirmation`: whether the organizer applies any additional team-wide
+cross-track accounting.
 
 Team rules:
 
@@ -151,7 +172,9 @@ Team rules:
 5. Review the proposed query count before any real API experiment.
 6. Share one team cache or evidence registry when operationally possible.
 7. Record network calls and cache hits in run artifacts, but never in `submission.json`.
-8. Require an explicit hard network-attempt cap for every live run; Public model development uses cache-only with cap zero.
+8. Require an explicit hard network-attempt cap for every live run; Public live
+   quality evaluation additionally requires explicit approval. Use cache-only
+   with cap zero for diagnostics that do not need new case evidence.
 9. Treat local ledger totals as a lower-bound operational record, never the official BTC count.
 
 ## Current repository behavior

@@ -32,7 +32,8 @@ Do not add scores unless a reproducible artifact and, where applicable, an offic
 - BM25 and hybrid Vietnamese law retrieval.
 - Qwen3-8B NF4 prediction and structured output validation.
 - Open-weight, fewer-than-10B model compliance and absence of proprietary model APIs.
-- Cache-only Public evaluation, atomic cache backup, checkpoint/resume, and staged Colab T4 execution.
+- Budgeted live Public evaluation, zero-call diagnostics, atomic cache backup,
+  automatic checkpoint resume, and smoke/full Colab T4 execution.
 
 ## 4. Experiments
 

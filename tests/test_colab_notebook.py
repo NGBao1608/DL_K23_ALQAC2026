@@ -3,72 +3,69 @@ import json
 from pathlib import Path
 
 
-NOTEBOOK_PATH = Path("notebooks/colab_rag.ipynb")
+NOTEBOOKS = {
+    "public": Path("notebooks/colab_public.ipynb"),
+    "private": Path("notebooks/colab_private.ipynb"),
+}
 
 
-def test_colab_notebook_is_clean_and_code_cells_compile():
-    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
-    assert notebook["nbformat"] == 4
-    code_cells = [
-        cell for cell in notebook["cells"] if cell["cell_type"] == "code"
-    ]
-    assert code_cells
-    for cell in code_cells:
-        assert cell["execution_count"] is None
-        assert cell["outputs"] == []
-        ast.parse("".join(cell["source"]))
+def _notebook_text(track: str) -> str:
+    return NOTEBOOKS[track].read_text(encoding="utf-8")
 
 
-def test_colab_notebook_exposes_required_safe_run_controls():
-    text = NOTEBOOK_PATH.read_text(encoding="utf-8")
-    for name in (
-        "TRACK",
-        "RUN_MODE",
-        "EXPERIMENT",
-        "EXECUTION_MODE",
-        "RUN_ID",
-        "SOURCE_MODE",
-        "ADAPTER_PATH",
-    ):
-        assert name in text
-    assert "cache-only" in text
-    assert "Check format" in text
-    assert "alqac_x" not in text.lower()
-    assert "drive/MyDrive/ALQAC2026" in text
-    assert "SOURCE_MODE = 'git'" in text
-    assert "GIT_REF = 'TuanAnh'" in text
-    assert "'git', 'clone', '--branch', GIT_REF, '--single-branch'" in text
-    assert "source_pin.json" in text
-    assert "['git', 'checkout', '--detach', pinned_commit]" in text
-    assert "Run runtime_check first with this RUN_ID" in text
-    assert "runtime_check_status') != 'PASS'" in text
-    assert "Full/resume requires a completed smoke run" in text
-    assert "smoke_manifest.get('git_commit') != pinned_commit" in text
-    notebook = json.loads(NOTEBOOK_PATH.read_text(encoding="utf-8"))
-    secret_preflight = "".join(notebook["cells"][2]["source"])
-    assert "required_secrets = ('GITHUB_TOKEN',)" in secret_preflight
-    assert "secret_or_none('HF_TOKEN')" not in secret_preflight
-    assert "secret_or_none('ALQAC_TEAM_TOKEN')" not in secret_preflight
-    assert "if hf_token:" in text
-    assert "team_token = secret_or_none('ALQAC_TEAM_TOKEN')" in text
-    assert "alqac-pip-check-baseline.json" in text
-    assert "('gradio', 'gradio-client', 'hf-gradio')" in text
-    assert "'pip', 'uninstall', '-q', '-y', *unused_colab_packages" in text
-    assert text.index("'pip', 'uninstall'") < text.index(
-        "'pip', 'install', '-q', '-r', 'requirements-colab.txt'"
-    )
-    assert "project_src = (PROJECT_ROOT / 'src').resolve()" in text
-    assert "module_name.startswith('alqac2026.')" in text
-    assert "sys.path.insert(0, project_src_text)" in text
-    assert "sys.path_importer_cache.pop(project_src_text, None)" in text
-    assert "importlib.invalidate_caches()" in text
-    assert "find_spec('alqac2026.artifacts')" in text
-    assert "ALQAC import provenance mismatch" in text
-    assert text.index("find_spec('alqac2026.artifacts')") < text.index(
-        "from alqac2026.artifacts import DriveArtifactLayout"
-    )
-    assert "introduced new conflicts" in text
-    assert "torch_version_after != pip_baseline['torch_version']" in text
+def test_colab_notebooks_are_clean_and_code_cells_compile():
+    for path in NOTEBOOKS.values():
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+        assert notebook["nbformat"] == 4
+        code_cells = [
+            cell for cell in notebook["cells"] if cell["cell_type"] == "code"
+        ]
+        assert code_cells
+        for cell in code_cells:
+            assert cell["execution_count"] is None
+            assert cell["outputs"] == []
+            ast.parse("".join(cell["source"]))
+
+
+def test_colab_notebooks_expose_only_smoke_and_full_stages():
+    for text in map(_notebook_text, NOTEBOOKS):
+        assert "STAGE = 'smoke'" in text
+        assert "assert STAGE in {'smoke', 'full'}" in text
+        assert "RUN_MODE" not in text
+        assert "STAGE = 'runtime_check'" not in text
+        assert "STAGE = 'resume'" not in text
+        assert "source_pin.json" in text
+        assert "smoke first" in text.lower()
+        assert "['git', 'checkout', '--detach', pinned_commit]" in text
+        assert "('gradio', 'gradio-client', 'hf-gradio')" in text
+        assert "module_name.startswith('alqac2026.')" in text
+        assert "Stale package import outside pinned checkout" in text
+
+
+def test_public_notebook_runs_live_pipeline_and_evaluator():
+    text = _notebook_text("public")
+    assert "run_public_stage" in text
+    assert "APPROVE_PUBLIC_API_CALLS = False" in text
+    assert "ALQAC_TEAM_TOKEN" in text
+    assert "metrics.json" in text
+    assert "errors.json" in text
+    assert "selection_profile.json" in text
+    assert "outcome_accuracy" in text
+    assert "law_micro_f1" in text
+    assert "private_test_60_cases_extracted_corpus.json" not in text
+
+
+def test_private_notebook_uses_private_inputs_without_evaluator():
+    text = _notebook_text("private")
+    assert "run_private_stage" in text
+    assert "ALQAC_private_test.json" in text
+    assert "private_test_60_cases_extracted_corpus.json" in text
+    assert "full/selection_profile.json" in text
+    assert "ALQAC_TEAM_TOKEN" in text
+    assert "metrics.json" not in text
+    assert "errors.json" not in text
+    assert "outcome_accuracy" not in text
+    assert "'upload': 'manual only'" in text
 
 
 def test_runtime_check_has_no_case_api_or_team_token_dependency():
