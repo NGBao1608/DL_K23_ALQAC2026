@@ -189,11 +189,19 @@ def test_case_prediction_failure_still_builds_complete_flagged_submission(
     manifest = json.loads(
         (run_dir / "manifest.json").read_text(encoding="utf-8")
     )
+    checkpoint = json.loads(
+        (run_dir / "predictions.checkpoint.json").read_text(encoding="utf-8")
+    )
     assert result["validation"]["status"] == "PASS"
     assert submission[0]["prediction"] == "B_WIN"
     assert manifest["run"]["completed"] == 1
     assert manifest["run"]["fallback_predictions"] == 1
     assert manifest["run"]["degraded_cases"] == 1
+    assert manifest["run"]["prediction_retry_cases"] == 1
+    assert manifest["run"]["recovered_prediction_cases"] == 0
+    assert manifest["run"]["prediction_attempts"] == 4
+    assert checkpoint["case_1"]["prediction_attempts"] == 4
+    assert checkpoint["case_1"]["prediction_failure_types"] == ["ValueError"] * 4
 
 
 def test_cache_only_run_uses_real_pipeline_without_network_or_token(
@@ -223,7 +231,15 @@ def test_cache_only_run_uses_real_pipeline_without_network_or_token(
     )
     api_plan = json.loads((run_dir / "api_plan.json").read_text(encoding="utf-8"))
     api_stats = json.loads((run_dir / "api_stats.json").read_text(encoding="utf-8"))
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert result["validation"]["status"] == "PASS"
+    assert result["validation"]["planner_fallbacks"] == 1
+    assert result["validation"]["degraded_cases"] == 0
+    assert manifest["run"]["planner_fallbacks"] == 1
+    assert manifest["run"]["degraded_cases"] == 0
+    assert manifest["run"]["prediction_retry_cases"] == 0
+    assert manifest["run"]["recovered_prediction_cases"] == 0
+    assert manifest["run"]["prediction_attempts"] == 1
     assert api_plan["execution_mode"] == "cache-only"
     assert api_plan["cache_misses"] == 3
     assert api_stats["run_network_attempts"] == 0

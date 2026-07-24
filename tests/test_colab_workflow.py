@@ -120,6 +120,38 @@ def test_smoke_accepts_recovered_transient_retrieval_error(tmp_path):
     )
 
 
+def test_smoke_accepts_safe_planner_fallback(tmp_path):
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "git_commit": "a" * 40,
+                "run": {
+                    "status": "completed",
+                    "completed": 2,
+                    "degraded_cases": 0,
+                    "planner_fallbacks": 1,
+                },
+            }
+        )
+    )
+    (tmp_path / "validation.json").write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "cases": 2,
+                "degraded_cases": 0,
+                "planner_fallbacks": 1,
+            }
+        )
+    )
+
+    _validate_stage_result(
+        stage_dir=tmp_path,
+        expected_cases=2,
+        source_pin={"commit": "a" * 40},
+    )
+
+
 def test_private_corpus_matches_reviewed_contract(tmp_path, monkeypatch):
     corpus_path = tmp_path / "private_test_60_cases_extracted_corpus.json"
     corpus_path.write_text("{}")

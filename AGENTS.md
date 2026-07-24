@@ -63,13 +63,21 @@ Read only the relevant canonical documents:
   attempt is allocated to one retry or adaptive query 3. A case-scoped
   timeout, `429`, `5xx`, malformed query, or exhausted per-case budget must
   degrade to cached/partial case evidence rather than fail the whole run.
-  Authentication, cache-integrity, backup, and model-load failures remain
-  fail-fast.
+  Authentication, cache-integrity, backup, and required law/outcome model-load
+  failures remain fail-fast. Planner load/generation/validation failures use
+  the deterministic planner fallback.
 - The configured LLM planner is pinned `Qwen/Qwen3-8B` in NF4 4-bit mode and
   runs in a separate stage. Planner fallback and prediction fallback counts
-  must be recorded in internal run artifacts. Smoke may not pass with a
-  degraded case; full may finish and validate a complete submission with
-  explicitly reported degraded cases for manual review.
+  must be recorded in internal run artifacts. A successful deterministic
+  planner fallback is informational and does not make a case degraded. Smoke
+  may not pass with an unresolved retrieval failure or prediction fallback;
+  full may finish and validate a complete submission with explicitly reported
+  degraded cases for manual review.
+- Outcome prediction retries a failed case at most three times after the
+  initial attempt. Every attempt must reuse the same checkpointed
+  `PreparedCase`; it must not repeat query planning, Case API retrieval, or law
+  retrieval. Deterministic outcome fallback is allowed only after all four
+  model attempts fail. Record only safe attempt counts and exception types.
 - The official submission limits conflict: the competition website says three submissions per day, while the leaderboard rules say 20 per team per 24 hours. Treat this as `Needs confirmation` and enforce the stricter team limit of at most three submissions in any 24-hour period.
 - Private Test permits at most three distinctly named runs in total; run names cannot be reused and the best run counts.
 

@@ -1,7 +1,7 @@
 import pytest
 
 import alqac2026.prediction as prediction_module
-from alqac2026.pipeline import ALQACPipeline, PreparedCase
+from alqac2026.pipeline import ALQACPipeline, CheckpointStore, PreparedCase
 from alqac2026.prediction import (
     DECISION_FIRST_SYSTEM_PROMPT,
     OutcomePredictor,
@@ -9,7 +9,13 @@ from alqac2026.prediction import (
     parse_prediction,
     parse_structured_prediction,
 )
-from alqac2026.schemas import CaseEvidence, InferenceCase, LawEvidence, OutcomeLabel
+from alqac2026.schemas import (
+    CaseEvidence,
+    InferenceCase,
+    LawEvidence,
+    OutcomeLabel,
+    PredictionResult,
+)
 
 
 class RepairBackend:
@@ -240,3 +246,143 @@ def test_case_prediction_failure_uses_submission_safe_operative_fallback():
     assert result.status == "completed"
     assert result.prediction is OutcomeLabel.B_WIN
     assert result.error == "PredictionFallback:ValueError"
+    assert result.prediction_attempts == 1
+    assert result.prediction_failure_types == ["ValueError"]
+
+
+def test_case_prediction_retries_three_times_with_same_prepared_context():
+    class RecoveringPredictor:
+        def __init__(self):
+            self.calls = 0
+            self.inputs = []
+
+        def predict(self, case, case_evidence, law_evidence):
+            self.calls += 1
+            self.inputs.append((case, case_evidence, law_evidence))
+            if self.calls <= 3:
+                raise RuntimeError("transient generation failure")
+            return OutcomeLabel.A_WIN, "Recovered prediction.", '{"label":"A_WIN"}'
+
+    prepared = PreparedCase(
+        case=InferenceCase("case_1", "Nguyên đơn yêu cầu trả nợ."),
+        case_evidence=[
+            CaseEvidence(
+                "opaque",
+                "Tuyên xử: chấp nhận toàn bộ yêu cầu khởi kiện.",
+                1.0,
+                "operative_verdict",
+            )
+        ],
+        law_evidence=[],
+        api_calls=2,
+    )
+    predictor = RecoveringPredictor()
+    retry_events = []
+    pipeline = ALQACPipeline(
+        None,
+        None,
+        predictor,
+        allow_prediction_fallback=True,
+        max_prediction_retries=3,
+        prediction_retry_callback=retry_events.append,
+    )
+
+    result = pipeline.predict_prepared(prepared)
+
+    assert result.status == "completed"
+    assert result.prediction is OutcomeLabel.A_WIN
+    assert result.error is None
+    assert result.prediction_attempts == 4
+    assert result.prediction_failure_types == ["RuntimeError"] * 3
+    assert predictor.calls == 4
+    assert retry_events == [
+        {
+            "case_id": "case_1",
+            "failed_attempt": 1,
+            "next_attempt": 2,
+            "max_attempts": 4,
+            "error_type": "RuntimeError",
+        },
+        {
+            "case_id": "case_1",
+            "failed_attempt": 2,
+            "next_attempt": 3,
+            "max_attempts": 4,
+            "error_type": "RuntimeError",
+        },
+        {
+            "case_id": "case_1",
+            "failed_attempt": 3,
+            "next_attempt": 4,
+            "max_attempts": 4,
+            "error_type": "RuntimeError",
+        },
+    ]
+    assert all(
+        case is prepared.case
+        and case_evidence is prepared.case_evidence
+        and law_evidence is prepared.law_evidence
+        for case, case_evidence, law_evidence in predictor.inputs
+    )
+
+
+def test_case_prediction_uses_fallback_only_after_all_retries_are_exhausted():
+    class FailingPredictor:
+        def __init__(self):
+            self.calls = 0
+
+        def predict(self, case, case_evidence, law_evidence):
+            self.calls += 1
+            raise ValueError("still invalid")
+
+    predictor = FailingPredictor()
+    pipeline = ALQACPipeline(
+        None,
+        None,
+        predictor,
+        allow_prediction_fallback=True,
+        max_prediction_retries=3,
+    )
+    result = pipeline.predict_prepared(
+        PreparedCase(
+            case=InferenceCase("case_1", "Nguyên đơn yêu cầu trả nợ."),
+            case_evidence=[],
+            law_evidence=[],
+            api_calls=0,
+        )
+    )
+
+    assert predictor.calls == 4
+    assert result.status == "completed"
+    assert result.prediction is OutcomeLabel.B_WIN
+    assert result.error == "PredictionFallback:ValueError"
+    assert result.prediction_attempts == 4
+    assert result.prediction_failure_types == ["ValueError"] * 4
+
+
+@pytest.mark.parametrize("value", [-1, 4, True, 1.5])
+def test_case_prediction_retry_cap_must_be_zero_to_three(value):
+    with pytest.raises(ValueError, match="integer from 0 to 3"):
+        ALQACPipeline(
+            None,
+            None,
+            object(),
+            max_prediction_retries=value,
+        )
+
+
+def test_prediction_retry_metadata_survives_checkpoint_resume(tmp_path):
+    store = CheckpointStore(tmp_path / "predictions.json")
+    result = PredictionResult(
+        case_id="case_1",
+        prediction=OutcomeLabel.A_WIN,
+        prediction_attempts=3,
+        prediction_failure_types=["RuntimeError", "ValueError"],
+    )
+    store.put(result)
+
+    restored = CheckpointStore(tmp_path / "predictions.json").get("case_1")
+
+    assert restored is not None
+    assert restored.prediction_attempts == 3
+    assert restored.prediction_failure_types == ["RuntimeError", "ValueError"]

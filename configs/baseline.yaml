@@ -55,6 +55,7 @@ prediction:
   thinking: false
   adapter_path: null
   allow_case_fallback: true
+  max_case_retries: 3
   fallback_label: B_WIN
   context_law_top_k: 5
   verification_reserve_tokens: 512

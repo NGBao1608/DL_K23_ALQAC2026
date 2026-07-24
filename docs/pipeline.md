@@ -196,14 +196,31 @@ The model must emit:
 The parser validates JSON, ratio range, and the official `>50%` boundary.
 Numeric ratios deterministically normalize inconsistent labels. Partial or
 inconsistent results receive one deterministic verifier pass; a malformed
-first output receives one repair. After those paths, a remaining case-scoped
-prediction error uses an explicitly configured deterministic fallback.
+first output receives one repair. These operations belong to one case-level
+prediction attempt.
+
+If that attempt still raises an exception, the prediction stage clears the CUDA
+cache and repeats the complete prediction against the exact same checkpointed
+`PreparedCase`. `max_case_retries: 3` permits three retries after the initial
+attempt, for at most four model attempts per case. Re-prediction never repeats
+query planning, Case API calls, or law retrieval. Only after all attempts fail
+does the pipeline use the explicitly configured deterministic fallback.
 Operative court language maps clear full acceptance/rejection first;
 unquantified partial acceptance maps conservatively to `PARTIAL_B_WIN`; the
 configured default is `B_WIN` when no trustworthy operative scope exists.
 This produces a complete format-valid result while recording
 `PredictionFallback:<error type>` internally. Model-load failure remains
 fail-fast. `adapter_path` optionally loads an approved PEFT adapter.
+
+Prediction checkpoints preserve `prediction_attempts` and safe
+`prediction_failure_types`. Manifest/validation artifacts report
+`prediction_retry_cases`, `recovered_prediction_cases`, and the total
+`prediction_attempts`. `ALQAC_PROGRESS` emits `prediction/retry_scheduled` with
+only attempt numbers and the exception type. A retry-recovered case is not
+degraded; a deterministic prediction fallback remains degraded and blocks
+smoke. Repeating a
+deterministic prompt may reproduce a persistent malformed output, so bounded
+re-prediction primarily protects against transient runtime/generation failure.
 
 Offline fine-tuning may use Public gold to construct labels, accepted/rejected
 scope, and reasoning targets. Inputs must remain production-equivalent:
@@ -213,10 +230,13 @@ one case remain in one fold. Report out-of-fold accuracy/confusion matrix, lock
 hyperparameters, then train the final adapter on all Public cases. A training
 notebook is `Not implemented yet`.
 
-Smoke rejects any planner, retrieval, or prediction degradation. Full records
-`degraded_cases`, `planner_fallbacks`, and `fallback_predictions` in its
-manifest and validation artifacts so a complete submission can be reviewed
-before manual upload.
+A successful deterministic planner fallback is the designed recovery path for
+an LLM planner load, timeout, generation, JSON, or grounding failure. It remains
+visible through `planner_fallbacks` but does not increment `degraded_cases`.
+Smoke rejects unresolved retrieval failures and prediction fallbacks. Full
+records `degraded_cases`, `planner_fallbacks`, and `fallback_predictions` in its
+manifest and validation artifacts, together with retry/recovery counts, so a
+complete submission can be reviewed before manual upload.
 
 Status: fallback completion is `CPU/mock verified`; the model path is not yet
 supported by a clean recorded `GPU/API verified` run.

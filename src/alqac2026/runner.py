@@ -238,6 +238,18 @@ def run_experiment(
             **payload,
         )
 
+    def emit_prediction_retry(event: dict[str, object]) -> None:
+        payload = dict(event)
+        case_id = str(payload.pop("case_id"))
+        _emit_progress(
+            stage="prediction",
+            status="retry_scheduled",
+            case=cases_by_id[case_id],
+            index=case_positions[case_id],
+            total=len(cases),
+            **payload,
+        )
+
     _emit_progress(
         stage="run",
         status="started",
@@ -508,6 +520,10 @@ def run_experiment(
                 prediction_fallback_label=OutcomeLabel(
                     config["prediction"].get("fallback_label", "B_WIN")
                 ),
+                max_prediction_retries=int(
+                    config["prediction"].get("max_case_retries", 0)
+                ),
+                prediction_retry_callback=emit_prediction_retry,
             )
             for case in pending_cases:
                 position = case_positions[case.case_id]
@@ -527,6 +543,17 @@ def run_experiment(
                     result.error
                     and result.error.startswith("PredictionFallback:")
                 )
+                case_status.setdefault(case.case_id, {}).update(
+                    {
+                        "prediction_attempts": result.prediction_attempts,
+                        "prediction_failure_types": result.prediction_failure_types,
+                        "prediction_recovered": (
+                            result.prediction_attempts > 1
+                            and result.status == "completed"
+                            and not result.error
+                        ),
+                    }
+                )
                 write_json(case_status_path, case_status)
                 progress_details = {
                     "prediction": (
@@ -536,6 +563,12 @@ def run_experiment(
                     "law_evidence_count": len(result.law_evidence),
                     "api_calls": result.api_calls,
                     "latency_seconds": round(result.latency_seconds, 3),
+                    "prediction_attempts": result.prediction_attempts,
+                    "prediction_recovered": (
+                        result.prediction_attempts > 1
+                        and result.status == "completed"
+                        and not result.error
+                    ),
                 }
                 if result.error:
                     progress_details["error_type"] = result.error.split(":", 1)[0]
@@ -628,6 +661,19 @@ def run_experiment(
             for result in results
             if result.error and result.error.startswith("PredictionFallback:")
         }
+        prediction_retry_case_ids = {
+            result.case_id for result in results if result.prediction_attempts > 1
+        }
+        prediction_recovered_case_ids = {
+            result.case_id
+            for result in results
+            if result.prediction_attempts > 1
+            and result.status == "completed"
+            and not result.error
+        }
+        total_prediction_attempts = sum(
+            result.prediction_attempts for result in results
+        )
         retrieval_degraded_case_ids = {
             case.case_id
             for case in cases
@@ -642,17 +688,19 @@ def run_experiment(
                 "retrieval_recovered_failure_codes"
             )
         }
-        degraded_case_ids = (
-            fallback_case_ids
-            | retrieval_degraded_case_ids
-            | planner_fallback_case_ids
-        )
+        # Planner fallback is the designed recovery path for a case-scoped
+        # planner timeout/load/generation/validation failure. Keep it visible,
+        # but reserve degradation for unresolved retrieval or prediction.
+        degraded_case_ids = fallback_case_ids | retrieval_degraded_case_ids
         validation.update(
             {
                 "degraded_cases": len(degraded_case_ids),
                 "fallback_predictions": len(fallback_case_ids),
                 "planner_fallbacks": len(planner_fallback_case_ids),
                 "recovered_retrieval_cases": len(retrieval_recovered_case_ids),
+                "prediction_retry_cases": len(prediction_retry_case_ids),
+                "recovered_prediction_cases": len(prediction_recovered_case_ids),
+                "prediction_attempts": total_prediction_attempts,
             }
         )
         write_json(run_dir / "validation.json", validation)
@@ -666,6 +714,9 @@ def run_experiment(
                 "planner_fallbacks": len(planner_fallback_case_ids),
                 "degraded_cases": len(degraded_case_ids),
                 "recovered_retrieval_cases": len(retrieval_recovered_case_ids),
+                "prediction_retry_cases": len(prediction_retry_case_ids),
+                "recovered_prediction_cases": len(prediction_recovered_case_ids),
+                "prediction_attempts": total_prediction_attempts,
             }
         )
         write_json(

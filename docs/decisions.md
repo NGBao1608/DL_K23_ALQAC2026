@@ -210,6 +210,24 @@ systemically invalid.
 
 A transient timeout, `429`, or `5xx` is not a degraded case when the bounded
 retry for the same logical query succeeds. It is recorded separately as a
-recovered retrieval error. Only an unresolved query failure, planner fallback,
-or prediction fallback contributes to `degraded_cases` and can fail the smoke
+recovered retrieval error. A deterministic planner fallback is also a designed
+recovery path: it remains counted under `planner_fallbacks` but does not
+contribute to `degraded_cases`. Only an unresolved retrieval failure or
+prediction fallback contributes to `degraded_cases` and can fail the smoke
 gate.
+
+## D-017: Bounded prepared-context re-prediction
+
+**Status:** Accepted and `CPU/mock verified`
+
+A case-level outcome prediction exception receives at most three retries after
+the initial attempt. Every retry reuses the exact checkpointed `PreparedCase`
+and therefore does not repeat query planning, Case API retrieval, or law
+retrieval. CUDA cache is cleared between failed attempts. One attempt may still
+contain the existing single JSON repair or partial-label verifier generation.
+
+If a later attempt succeeds, the case is completed without degradation and the
+safe attempt/failure-type metadata remains internal. If all four attempts fail,
+the deterministic outcome fallback produces a complete flagged result.
+Model-load failure before the case loop remains fail-fast. The retry bound is
+shared by smoke and full through the same resolved configuration.

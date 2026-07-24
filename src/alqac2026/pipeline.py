@@ -4,6 +4,7 @@ import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Callable
 
 from .config import write_json
 from .schemas import (
@@ -58,6 +59,11 @@ class CheckpointStore:
             latency_seconds=float(record.get("latency_seconds", 0.0)),
             status=record.get("status", "completed"),
             error=record.get("error"),
+            prediction_attempts=max(1, int(record.get("prediction_attempts", 1))),
+            prediction_failure_types=[
+                str(value)
+                for value in record.get("prediction_failure_types", [])
+            ],
         )
 
 
@@ -98,12 +104,24 @@ class ALQACPipeline:
         *,
         allow_prediction_fallback: bool = False,
         prediction_fallback_label: OutcomeLabel = OutcomeLabel.B_WIN,
+        max_prediction_retries: int = 0,
+        prediction_retry_callback: (
+            Callable[[dict[str, object]], None] | None
+        ) = None,
     ):
+        if (
+            isinstance(max_prediction_retries, bool)
+            or not isinstance(max_prediction_retries, int)
+            or not 0 <= max_prediction_retries <= 3
+        ):
+            raise ValueError("max_prediction_retries must be an integer from 0 to 3")
         self.case_retriever = case_retriever
         self.law_retriever = law_retriever
         self.predictor = predictor
         self.allow_prediction_fallback = allow_prediction_fallback
         self.prediction_fallback_label = prediction_fallback_label
+        self.max_prediction_retries = max_prediction_retries
+        self.prediction_retry_callback = prediction_retry_callback
 
     def prepare_case(self, case: InferenceCase, law_top_k: int = 5) -> PreparedCase:
         case_evidence, api_calls = self.case_retriever.retrieve(case)
@@ -113,23 +131,50 @@ class ALQACPipeline:
 
     def predict_prepared(self, prepared: PreparedCase) -> PredictionResult:
         started = time.perf_counter()
-        try:
-            label, reasoning, raw = self.predictor.predict(
-                prepared.case, prepared.case_evidence, prepared.law_evidence
-            )
-            return PredictionResult(
-                case_id=prepared.case.case_id,
-                prediction=label,
-                case_evidence=prepared.case_evidence,
-                law_evidence=prepared.law_evidence,
-                reasoning=reasoning,
-                raw_output=raw,
-                api_calls=prepared.api_calls,
-                latency_seconds=time.perf_counter() - started,
-            )
-        except Exception as error:  # preserve progress and make failures explicit
-            if self.allow_prediction_fallback:
+        failure_types: list[str] = []
+        max_attempts = 1 + self.max_prediction_retries
+        for attempt_index in range(max_attempts):
+            try:
+                label, reasoning, raw = self.predictor.predict(
+                    prepared.case, prepared.case_evidence, prepared.law_evidence
+                )
+                return PredictionResult(
+                    case_id=prepared.case.case_id,
+                    prediction=label,
+                    case_evidence=prepared.case_evidence,
+                    law_evidence=prepared.law_evidence,
+                    reasoning=reasoning,
+                    raw_output=raw,
+                    api_calls=prepared.api_calls,
+                    latency_seconds=time.perf_counter() - started,
+                    prediction_attempts=attempt_index + 1,
+                    prediction_failure_types=failure_types,
+                )
+            except Exception as error:
+                failure_types.append(type(error).__name__)
                 _clear_cuda_cache_after_case_failure()
+                if attempt_index + 1 < max_attempts:
+                    self._emit_prediction_retry(
+                        case_id=prepared.case.case_id,
+                        failed_attempt=attempt_index + 1,
+                        next_attempt=attempt_index + 2,
+                        max_attempts=max_attempts,
+                        error_type=type(error).__name__,
+                    )
+                    continue
+                if not self.allow_prediction_fallback:
+                    return PredictionResult(
+                        case_id=prepared.case.case_id,
+                        prediction=None,
+                        case_evidence=prepared.case_evidence,
+                        law_evidence=prepared.law_evidence,
+                        api_calls=prepared.api_calls,
+                        latency_seconds=time.perf_counter() - started,
+                        status="failed",
+                        error=f"{type(error).__name__}: {error}",
+                        prediction_attempts=attempt_index + 1,
+                        prediction_failure_types=failure_types,
+                    )
                 fallback_label, fallback_reason = _fallback_outcome(
                     prepared.case_evidence,
                     default=self.prediction_fallback_label,
@@ -144,17 +189,19 @@ class ALQACPipeline:
                     latency_seconds=time.perf_counter() - started,
                     status="completed",
                     error=f"PredictionFallback:{type(error).__name__}",
+                    prediction_attempts=attempt_index + 1,
+                    prediction_failure_types=failure_types,
                 )
-            return PredictionResult(
-                case_id=prepared.case.case_id,
-                prediction=None,
-                case_evidence=prepared.case_evidence,
-                law_evidence=prepared.law_evidence,
-                api_calls=prepared.api_calls,
-                latency_seconds=time.perf_counter() - started,
-                status="failed",
-                error=f"{type(error).__name__}: {error}",
-            )
+        raise RuntimeError("Prediction retry loop terminated unexpectedly")
+
+    def _emit_prediction_retry(self, **event: object) -> None:
+        if self.prediction_retry_callback is None:
+            return
+        try:
+            self.prediction_retry_callback(event)
+        except Exception:
+            # Observability must never interrupt bounded case recovery.
+            return
 
     def predict_case(self, case: InferenceCase, law_top_k: int = 5) -> PredictionResult:
         return self.predict_prepared(self.prepare_case(case, law_top_k=law_top_k))

@@ -15,6 +15,7 @@ from alqac2026.config import (
 )
 from alqac2026.data import load_inference_cases, load_law_corpus
 from alqac2026.law_retrieval import HybridLawRetriever, create_law_retriever
+from alqac2026.pipeline import ALQACPipeline, PreparedCase
 from alqac2026.prediction import create_predictor
 from alqac2026.query_planning import create_query_planner
 
@@ -119,17 +120,30 @@ def main() -> None:
     started = time.perf_counter()
     predictor = create_predictor(config["prediction"])
     try:
-        label, reasoning, _ = predictor.predict(case, [], law_evidence)
+        prediction_pipeline = ALQACPipeline(
+            None,
+            None,
+            predictor,
+            allow_prediction_fallback=False,
+            max_prediction_retries=int(
+                config["prediction"].get("max_case_retries", 0)
+            ),
+        )
+        prediction_result = prediction_pipeline.predict_prepared(
+            PreparedCase(case, [], law_evidence, 0)
+        )
     finally:
         backend = getattr(predictor, "backend", None)
         if backend is not None and hasattr(backend, "release"):
             backend.release()
-    if not reasoning:
+    if prediction_result.status != "completed" or not prediction_result.reasoning:
         raise ValueError("Runtime prediction did not return validated reasoning")
     report["stages"]["generation"] = {
         "status": "PASS",
         "seconds": round(time.perf_counter() - started, 3),
-        "label": label.value,
+        "label": prediction_result.prediction.value,
+        "prediction_attempts": prediction_result.prediction_attempts,
+        "prediction_failure_types": prediction_result.prediction_failure_types,
     }
     report["status"] = "PASS"
     report["models"] = {

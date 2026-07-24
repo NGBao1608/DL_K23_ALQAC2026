@@ -24,6 +24,7 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 | Complete Public baseline | Create a comparable 50-case BM25 + Qwen run | Public runner | Reproducible full Public run and validated candidate submission | Not implemented yet |
 | Complete Public candidate | Evaluate hybrid law retrieval and reranking | `candidate.yaml`, public runner | Reproducible full Public candidate run | Not implemented yet |
 | Validate refreshed submission | Prevent format rejection | Submission builder/validator | `validation.json` PASS under opaque-ID rules | CPU/mock verified |
+| Add bounded outcome re-prediction | Recover transient per-case generation failures without repeating retrieval | Prediction pipeline, checkpoints, candidate/baseline config | At most three retries using one prepared context, then deterministic fallback | CPU/mock verified |
 | Submit manually and record score | Obtain official metric values | Official submission page, experiment registry | Leaderboard result tied to run manifest and Git revision | Not implemented yet |
 | Run Private inference | Produce the scored final file from the 60-case Private input | Private runner/notebook | Complete validated `submission.json` and named-run record | Not implemented yet |
 

@@ -66,4 +66,5 @@ class PredictionResult:
     latency_seconds: float = 0.0
     status: str = "completed"
     error: str | None = None
-
+    prediction_attempts: int = 1
+    prediction_failure_types: list[str] = field(default_factory=list)
