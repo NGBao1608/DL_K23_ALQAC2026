@@ -163,7 +163,11 @@ def build_law_query(
     ordered = sorted(
         case_evidence,
         key=lambda item: (
-            0 if item.query_type == "court_decision" else 1,
+            {
+                "operative_verdict": 0,
+                "adaptive_missing_scope": 1,
+                "remedy_scope": 2,
+            }.get(item.query_type, 3),
             -item.score,
         ),
     )

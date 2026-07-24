@@ -15,7 +15,13 @@ This document describes the repository implementation. It is not an official com
 ```text
 case_id + case_query
         │
-        ├── Case Content API retrieval ──→ case evidence
+        ├── LLM structured planner
+        │       └── safe deterministic fallback
+        │
+        ├── two primary Case API queries
+        │       └── evidence gate ──→ optional adaptive query 3
+        │
+        ├───────────────────────────────→ case evidence
         ├── BM25 / hybrid law retrieval ─→ law evidence
         └── Qwen3-8B prediction ─────────→ outcome label
                                               │
@@ -47,13 +53,43 @@ The following Public-only fields must never become inference features: `verdict_
 
 ## 2. Case evidence retrieval
 
+### Structured planning stage
+
+The planner runs before law retrieval and outcome generation:
+
+1. pinned `Qwen/Qwen3-0.6B` at revision
+   `c1899de289a04d12100db370d81485cdf75e47ca` attempts a deterministic,
+   thinking-disabled structured plan with a 256-token output limit and
+   deadline-aware 12-second generation stop;
+2. output is validated for exact schema, required claim/remedy/object coverage,
+   canonical case type, and lexical grounding in `case_query`;
+3. load, generation, timeout, JSON, validation, or runtime failure selects the
+   deterministic planner without failing the case; and
+4. the planner backend is released before law retrieval models load.
+
+The plan contains `case_type`, `main_claim`, `requested_remedies`,
+`legal_objects`, and `amounts_or_areas`. The deterministic planner normalizes
+Unicode/whitespace and extracts dispute type, requested relief, money/area,
+contract and land identifiers, and primary legal objects.
+
+The deterministic composer produces up to three concise de-duplicated queries:
+operative verdict plus main claim, remedy/object scope, and an adaptive missing
+scope query. It never sends the full normalized `case_query` and never predicts
+the winner or acceptance result.
+
+### Retrieval and sufficiency gate
+
 Live retrieval:
 
-- uses two deterministic production queries: `court_decision` and normalized `case_query`;
+- always attempts the two primary queries subject to remaining budget;
+- checks operative markers, court/Hội đồng xét xử source role, claim/object
+  overlap, accepted/rejected scope, procedural/party-statement negatives, and
+  duplicate `chunk_id`;
+- issues the third query only when the gate fails and budget remains;
 - calls official `POST /retrieve` with `X-API-Key`;
 - enforces a five-second interval;
-- permits at most one retry for `429` and `5xx` within a global run cap;
-- stops on `403` and `422`;
+- permits at most one retry for timeout, `429`, or `5xx`;
+- does not retry `400`, `401`, `403`, or `422`;
 - caches successful responses in SQLite; and
 - de-duplicates results by exact `chunk_id`.
 
@@ -65,11 +101,29 @@ These are low-level runner execution modes, not user-facing Colab stages. The
 canonical Colab notebooks expose only `smoke` and `full`; both use live
 retrieval, while smoke automatically executes the zero-API model gate first.
 
-Preflight counts logical queries, cache hits, and cache misses without contacting the official API. A successful response, its attempt ledger row, and a pending-backup marker are committed in one SQLite transaction. When `cache_backup_db` is configured, every success, HTTP error, or exception produces a verified atomic backup before another request is attempted. On resume, a new live client repairs pending backup state before returning a cache hit or sending a request; backup failure stops the run.
+Preflight counts the maximum logical queries plus cache hits/misses without
+contacting the official API. The global cap is
+`planned_cases × max_network_attempts_per_case`; the default per-case cap is
+three, shared by retries and semantic queries. Cache hits spend no attempt.
+Run-key/per-case counts are restored from the SQLite ledger when the client is
+recreated. A successful response, its attempt ledger row, and a pending-backup
+marker are committed in one SQLite transaction. When `cache_backup_db` is
+configured, every success, HTTP error, or exception produces a verified atomic
+backup before another request is attempted. On resume, a new live client
+repairs pending backup state before returning a cache hit or sending a request;
+backup failure stops the run.
 
 During retrieval, `ALQAC_PROGRESS` records safe lifecycle events (`request_started`, `request_completed`, `http_error`, `request_exception`, `retry_scheduled`, `cache_hit`, and `cache_miss`) without exposing query text, response text, headers, or secrets.
 
-Status: cache, retry, two-query policy, preflight, budget guard, and ledger are `CPU/mock verified`; a clean run against the refreshed official API is not yet recorded as `GPU/API verified`.
+The query-plan artifact is reused only when its fingerprint matches `case_id`,
+raw `case_query` SHA-256, configured planner strategy/model revision, prompt
+version, and composer version. It is internal, absent from `ALQAC_PROGRESS`,
+submission, and exports.
+
+Status: structured fallback planning, composer, evidence gate, adaptive policy,
+cache, retry, preflight, budget guards, resume ledger, and artifact exclusion
+are `CPU/mock verified`; the pinned planner and refreshed official API path are
+not yet `GPU/API verified`.
 
 Because API calls accumulate permanently across runs, broad query experimentation is prohibited without a reviewed call budget.
 
@@ -119,7 +173,15 @@ The model must emit:
 }
 ```
 
-The parser validates JSON, ratio range, and the official `>50%` boundary. Numeric ratios deterministically normalize inconsistent labels. Partial or inconsistent results receive one deterministic verifier pass; a malformed first output receives one repair. Unrecoverable output creates a failed result that cannot be submitted. `adapter_path` optionally loads an approved PEFT adapter; no fine-tuning data path is enabled.
+The parser validates JSON, ratio range, and the official `>50%` boundary. Numeric ratios deterministically normalize inconsistent labels. Partial or inconsistent results receive one deterministic verifier pass; a malformed first output receives one repair. Unrecoverable output creates a failed result that cannot be submitted. `adapter_path` optionally loads an approved PEFT adapter.
+
+Offline fine-tuning may use Public gold to construct labels, accepted/rejected
+scope, and reasoning targets. Inputs must remain production-equivalent:
+`case_query`, cached Case API evidence, and retrieved law evidence. Evaluation
+uses group-preserving stratified five-fold splits by `case_id`; augmentations of
+one case remain in one fold. Report out-of-fold accuracy/confusion matrix, lock
+hyperparameters, then train the final adapter on all Public cases. A training
+notebook is `Not implemented yet`.
 
 Status: `implemented`; not yet supported by a clean recorded `GPU/API verified` run.
 
@@ -163,7 +225,17 @@ Status: outcome/law evaluation is `CPU/mock verified`; official scoring is not l
 
 ## 8. Checkpointing and artifacts
 
-Each run records resolved configuration, environment, API preflight, prepared contexts, predictions, API statistics, validation, metrics, errors, law selection, and a manifest containing Git/model/corpus/input identifiers. `scripts/check_runtime.py` creates the zero-API embedding/reranker/Qwen gate before live retrieval. In Colab, smoke persists one exact source commit per `RUN_ID`; full requires a completed two-case smoke gate from that commit and automatically resumes only its own full checkpoint directory.
+Each run records resolved configuration, environment, API preflight, internal
+query plans, prepared contexts, predictions, API statistics, validation,
+metrics, errors, law selection, and a manifest containing Git/model/corpus/input
+identifiers. `scripts/check_runtime.py` creates the zero-API
+planner/embedding/reranker/Qwen gate before live retrieval. In Colab, smoke
+persists one exact source commit and `workflow_config.json` fingerprint per
+`RUN_ID`; full requires a completed two-case smoke gate from that exact
+commit/config and automatically resumes only its own full checkpoint directory.
+Smoke/full differ only by case count, stage directory, case-count-derived
+network cap, and gate state. Their shared query-plan store and SQLite cache
+reuse overlapping smoke work.
 
 Successful API responses and prepared contexts are reused during resume. Run
 identity includes input, config, execution mode, limit, storage paths,
@@ -182,7 +254,8 @@ Notebook logic remains thin; reusable behavior belongs in `src/alqac2026`.
 |---|---|
 | `schemas.py` | Inference, gold, evidence, label, and result types |
 | `data.py` | Load and separate inference/gold data; load law corpus |
-| `case_retrieval.py` | Query generation, official API client, throttle, retry, and cache |
+| `query_planning.py` | Structured planners, Transformers backend, composer, validation/store, and evidence gate |
+| `case_retrieval.py` | Official API client, adaptive execution, throttle, retry, budget, ledger, and cache |
 | `law_retrieval.py` | BM25, embedding retrieval, RRF, and reranking |
 | `prediction.py` | Token-aware Qwen context, structured parser, verifier, repair, and optional adapter |
 | `pipeline.py` | Context preparation and prediction orchestration |

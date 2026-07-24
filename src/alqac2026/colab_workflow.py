@@ -14,8 +14,13 @@ from .artifacts import (
     restore_directory,
     restore_sqlite_cache,
 )
-from .case_retrieval import SQLiteEvidenceCache, build_api_plan
-from .config import git_revision, load_config, sha256_file, write_json
+from .config import (
+    config_fingerprint,
+    git_revision,
+    load_config,
+    sha256_file,
+    write_json,
+)
 from .data import (
     PRIVATE_INPUT_SHA256,
     load_inference_cases,
@@ -43,7 +48,6 @@ def run_public_stage(
     local_root: str | Path,
     config_path: str | Path,
     approved_live_api: bool,
-    retry_reserve: int = 4,
     adapter_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run one source-pinned Public smoke/full stage with local evaluation."""
@@ -64,7 +68,6 @@ def run_public_stage(
         input_path=root / "data/raw/ALQAC2026_public_test.json",
         corpus_path=root / "data/raw/corpus_law_pub.json",
         selection_profile=None,
-        retry_reserve=retry_reserve,
         adapter_path=adapter_path,
     )
 
@@ -78,7 +81,6 @@ def run_private_stage(
     drive_root: str | Path,
     local_root: str | Path,
     config_path: str | Path,
-    retry_reserve: int = 4,
     adapter_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run one source-pinned Private smoke/full stage and validate submission."""
@@ -110,7 +112,6 @@ def run_private_stage(
         input_path=private_input,
         corpus_path=private_corpus,
         selection_profile=selection_profile,
-        retry_reserve=retry_reserve,
         adapter_path=adapter_path,
     )
 
@@ -127,10 +128,9 @@ def _run_stage(
     input_path: Path,
     corpus_path: Path,
     selection_profile: Path | None,
-    retry_reserve: int,
     adapter_path: str | Path | None,
 ) -> dict[str, Any]:
-    _validate_stage_inputs(track, stage, run_id, retry_reserve)
+    _validate_stage_inputs(track, stage, run_id)
     expected_cases = TRACK_CASES[track]
     cases = load_inference_cases(input_path)
     if len(cases) != expected_cases:
@@ -159,22 +159,25 @@ def _run_stage(
         config["prediction"]["adapter_path"] = str(Path(adapter_path).resolve())
     resolved_config = workflow_root / "workflow_config.json"
     _write_or_verify_json(resolved_config, config)
+    workflow_config_fingerprint = config_fingerprint(config)
 
     planned_cases = cases[:2] if stage == "smoke" else cases
-    cache = SQLiteEvidenceCache(local_cache)
-    try:
-        cache.integrity_check()
-        api_plan = build_api_plan(
-            planned_cases,
-            cache,
-            max_queries=2,
-            approved_max_network_calls=None,
-        )
-    finally:
-        cache.close()
+    max_attempts_per_case = int(
+        config["case_retrieval"]["max_network_attempts_per_case"]
+    )
+    network_cap = len(planned_cases) * max_attempts_per_case
+    api_plan = {
+        "planned_cases": len(planned_cases),
+        "primary_queries": int(config["case_retrieval"]["primary_queries"]),
+        "max_logical_queries_per_case": int(
+            config["case_retrieval"]["max_logical_queries_per_case"]
+        ),
+        "max_network_attempts_per_case": max_attempts_per_case,
+        "approved_max_network_calls": network_cap,
+        "config_fingerprint": workflow_config_fingerprint,
+    }
 
     if stage == "smoke":
-        network_cap = 4
         _run_model_gate(
             repo_root=repo_root,
             workflow_root=workflow_root,
@@ -186,11 +189,10 @@ def _run_stage(
         )
         backup_directory(local_index, drive_index)
     else:
-        _require_smoke_gate(workflow_root, source_pin)
-        network_cap = _load_or_create_full_budget(
-            workflow_root=workflow_root,
-            api_plan=api_plan,
-            retry_reserve=retry_reserve,
+        _require_smoke_gate(
+            workflow_root,
+            source_pin,
+            workflow_config_fingerprint,
         )
 
     api_plan.update(
@@ -198,6 +200,7 @@ def _run_stage(
             "track": track,
             "stage": stage,
             "approved_max_network_calls": network_cap,
+            "config_fingerprint": workflow_config_fingerprint,
             "corpus_sha256": sha256_file(corpus_path),
             "index_fingerprint": index_fingerprint,
         }
@@ -217,6 +220,7 @@ def _run_stage(
         law_index_dir=local_index,
         selection_profile=selection_profile,
         adapter_path=adapter_path,
+        query_plan_store_path=workflow_root / "query_plans.json",
     )
     _validate_stage_result(
         stage_dir=stage_dir,
@@ -231,6 +235,7 @@ def _run_stage(
                 "git_commit": source_pin["commit"],
                 "cases": 2,
                 "track": track,
+                "config_fingerprint": workflow_config_fingerprint,
             },
         )
     else:
@@ -286,43 +291,23 @@ def _run_model_gate(
 
 
 def _require_smoke_gate(
-    workflow_root: Path, source_pin: dict[str, Any]
+    workflow_root: Path,
+    source_pin: dict[str, Any],
+    expected_config_fingerprint: str,
 ) -> None:
     gate = _read_json(workflow_root / "smoke_gate.json")
     if (
         gate.get("status") != "PASS"
         or gate.get("cases") != 2
         or gate.get("git_commit") != source_pin.get("commit")
+        or gate.get("config_fingerprint") != expected_config_fingerprint
     ):
-        raise ValueError("Full requires a passing two-case smoke on the pinned commit")
+        raise ValueError(
+            "Full requires a passing two-case smoke on the pinned commit and config"
+        )
     report = _read_json(workflow_root / "runtime_check.json")
     if report.get("status") != "PASS":
         raise ValueError("Full requires the model-only runtime check from smoke")
-
-
-def _load_or_create_full_budget(
-    *,
-    workflow_root: Path,
-    api_plan: dict[str, Any],
-    retry_reserve: int,
-) -> int:
-    budget_path = workflow_root / "full_budget.json"
-    if budget_path.exists():
-        value = _read_json(budget_path).get("approved_max_network_calls")
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError(f"Invalid saved full budget: {budget_path}")
-        return value
-    value = int(api_plan["cache_misses"]) + retry_reserve
-    write_json(
-        budget_path,
-        {
-            "approved_max_network_calls": value,
-            "initial_cache_misses": int(api_plan["cache_misses"]),
-            "retry_reserve": retry_reserve,
-        },
-    )
-    return value
-
 
 def _validate_stage_result(
     *,
@@ -372,17 +357,13 @@ def _validate_private_corpus(path: Path) -> None:
         )
 
 
-def _validate_stage_inputs(
-    track: str, stage: str, run_id: str, retry_reserve: int
-) -> None:
+def _validate_stage_inputs(track: str, stage: str, run_id: str) -> None:
     if track not in TRACK_CASES:
         raise ValueError("track must be public or private")
     if stage not in STAGES:
         raise ValueError("stage must be smoke or full")
     if not run_id.strip() or "/" in run_id or "\\" in run_id:
         raise ValueError("run_id must be one non-empty path component")
-    if retry_reserve < 0:
-        raise ValueError("retry_reserve must be non-negative")
 
 
 def _write_or_verify_json(path: Path, value: Any) -> None:

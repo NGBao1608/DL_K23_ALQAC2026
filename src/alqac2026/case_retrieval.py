@@ -7,13 +7,16 @@ import sqlite3
 import tempfile
 import time
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 import requests
 
 from .schemas import CaseEvidence, InferenceCase
+from .query_planning import (
+    StoredQueryPlan,
+    evaluate_evidence_sufficiency,
+)
 
 
 API_VERSION = "retrieve-v1"
@@ -23,12 +26,6 @@ class ApiBudgetExceeded(RuntimeError):
     """Raised before an HTTP request would exceed the approved run budget."""
 
 
-@dataclass(frozen=True, slots=True)
-class EvidenceQuery:
-    text: str
-    query_type: str
-
-
 def normalize_query(query: str) -> str:
     return re.sub(r"\s+", " ", query).strip().lower()
 
@@ -36,43 +33,6 @@ def normalize_query(query: str) -> str:
 def cache_key(case_id: str, query: str, api_version: str = API_VERSION) -> str:
     value = f"{api_version}\0{case_id}\0{normalize_query(query)}"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-class EvidenceQueryGenerator:
-    TEMPLATES = (
-        ("quyết định của tòa án tuyên xử", "court_decision"),
-        ("chấp nhận yêu cầu khởi kiện của nguyên đơn", "accepted_claim"),
-        ("không chấp nhận yêu cầu của nguyên đơn", "rejected_claim"),
-        ("nhận định của hội đồng xét xử", "court_reasoning"),
-        ("áp dụng điều luật", "applied_law"),
-        ("nghĩa vụ chịu án phí dân sự sơ thẩm", "court_fee"),
-    )
-
-    def generate(self, case_query: str, max_queries: int = 8) -> list[EvidenceQuery]:
-        if max_queries < 0:
-            raise ValueError("max_queries must be non-negative")
-        original = EvidenceQuery(normalize_query(case_query)[:500], "original")
-        queries = [
-            EvidenceQuery(*self.TEMPLATES[0]),
-            original,
-            *(
-                EvidenceQuery(text, query_type)
-                for text, query_type in self.TEMPLATES[1:]
-            ),
-        ]
-        match = re.search(r"tranh chấp[^.,;?]*", case_query, flags=re.IGNORECASE)
-        if match:
-            queries.append(EvidenceQuery(match.group(0).strip(), "dispute_type"))
-        result: list[EvidenceQuery] = []
-        seen: set[str] = set()
-        for query in queries:
-            normalized = normalize_query(query.text)
-            if normalized and normalized not in seen:
-                seen.add(normalized)
-                result.append(query)
-            if len(result) >= max_queries:
-                break
-        return result
 
 
 class SQLiteEvidenceCache:
@@ -356,6 +316,7 @@ class CaseContentClient:
         timeout_seconds: int = 30,
         retries: int = 4,
         max_network_calls: int | None = None,
+        max_network_attempts_per_case: int = 3,
         run_key: str = "unscoped",
         session: requests.Session | None = None,
         sleep: Callable[[float], None] = time.sleep,
@@ -374,7 +335,10 @@ class CaseContentClient:
         self.retries = retries
         if max_network_calls is not None and max_network_calls < 0:
             raise ValueError("max_network_calls must be non-negative")
+        if max_network_attempts_per_case < 1:
+            raise ValueError("max_network_attempts_per_case must be positive")
         self.max_network_calls = max_network_calls
+        self.max_network_attempts_per_case = max_network_attempts_per_case
         self.run_key = run_key
         self.session = session or requests.Session()
         self.sleep = sleep
@@ -390,8 +354,20 @@ class CaseContentClient:
         self.network_calls = int(existing_stats["network_attempts"])
         self.successful_calls = int(existing_stats["successful_calls"])
         self.cache_hits = 0
-        self.per_case_attempts: dict[str, int] = defaultdict(int)
-        self.per_case_successes: dict[str, int] = defaultdict(int)
+        self.per_case_attempts: dict[str, int] = defaultdict(
+            int,
+            {
+                case_id: int(value["network_attempts"])
+                for case_id, value in existing_stats["per_case"].items()
+            },
+        )
+        self.per_case_successes: dict[str, int] = defaultdict(
+            int,
+            {
+                case_id: int(value["successful_calls"])
+                for case_id, value in existing_stats["per_case"].items()
+            },
+        )
         self.per_case_cache_hits: dict[str, int] = defaultdict(int)
 
     def _emit_progress(self, **event: object) -> None:
@@ -417,8 +393,24 @@ class CaseContentClient:
                 "Approved Case Content API network-call budget exhausted before "
                 f"requesting {case_id}: {self.max_network_calls}"
             )
+        if self.per_case_attempts[case_id] >= self.max_network_attempts_per_case:
+            raise ApiBudgetExceeded(
+                "Per-case Case Content API network-attempt budget exhausted before "
+                f"requesting {case_id}: {self.max_network_attempts_per_case}"
+            )
         self.network_calls += 1
         self.per_case_attempts[case_id] += 1
+
+    def remaining_case_attempts(self, case_id: str) -> int:
+        return max(
+            0,
+            self.max_network_attempts_per_case - self.per_case_attempts[case_id],
+        )
+
+    def can_retrieve(self, case_id: str, query: str) -> bool:
+        return self.cache.contains(case_id, query) or self.remaining_case_attempts(
+            case_id
+        ) > 0
 
     def _backup_cache(self) -> None:
         if self.backup_path is not None:
@@ -629,6 +621,12 @@ class CachedCaseContentClient:
         self.cache_misses = 0
         self.per_case_cache_hits: dict[str, int] = defaultdict(int)
 
+    def remaining_case_attempts(self, case_id: str) -> int:
+        return 0
+
+    def can_retrieve(self, case_id: str, query: str) -> bool:
+        return True
+
     def _emit_progress(self, **event: object) -> None:
         if self.progress_callback is None:
             return
@@ -664,18 +662,26 @@ class CachedCaseContentClient:
 class CaseEvidenceRetriever:
     def __init__(
         self,
-        client: CaseContentClient,
-        query_generator: EvidenceQueryGenerator | None = None,
-        max_queries: int = 8,
+        client: CaseContentClient | CachedCaseContentClient,
+        query_plans: dict[str, StoredQueryPlan],
+        primary_queries: int = 2,
+        max_logical_queries_per_case: int = 3,
     ):
         self.client = client
-        self.query_generator = query_generator or EvidenceQueryGenerator()
-        self.max_queries = max_queries
+        self.query_plans = query_plans
+        self.primary_queries = primary_queries
+        self.max_logical_queries_per_case = max_logical_queries_per_case
 
     def retrieve(self, case: InferenceCase) -> tuple[list[CaseEvidence], int]:
         before = self.client.network_calls
+        stored_plan = self.query_plans[case.case_id]
+        queries = list(stored_plan.queries[: self.max_logical_queries_per_case])
+        if len(queries) < self.primary_queries:
+            raise ValueError(f"Query plan has fewer than two primary queries: {case.case_id}")
         evidence: dict[str, CaseEvidence] = {}
-        for query in self.query_generator.generate(case.case_query, self.max_queries):
+        raw_evidence: list[CaseEvidence] = []
+
+        def execute(query) -> None:
             for hit in self.client.retrieve(
                 case.case_id, query.text, query_type=query.query_type
             ):
@@ -685,9 +691,23 @@ class CaseEvidenceRetriever:
                     score=float(hit.get("score", 0.0)),
                     query_type=query.query_type,
                 )
+                raw_evidence.append(item)
                 previous = evidence.get(item.chunk_id)
                 if previous is None or item.score > previous.score:
                     evidence[item.chunk_id] = item
+
+        for query in queries[: self.primary_queries]:
+            execute(query)
+        sufficiency = evaluate_evidence_sufficiency(raw_evidence, stored_plan.plan)
+        if (
+            not sufficiency.sufficient
+            and len(queries) > self.primary_queries
+            and self.client.can_retrieve(
+                case.case_id,
+                queries[self.primary_queries].text,
+            )
+        ):
+            execute(queries[self.primary_queries])
         return list(evidence.values()), self.client.network_calls - before
 
 
@@ -695,16 +715,17 @@ def build_api_plan(
     cases: list[InferenceCase],
     cache: SQLiteEvidenceCache,
     *,
-    max_queries: int,
+    query_plans: dict[str, StoredQueryPlan],
+    max_logical_queries_per_case: int,
     approved_max_network_calls: int | None = None,
-    query_generator: EvidenceQueryGenerator | None = None,
 ) -> dict:
-    generator = query_generator or EvidenceQueryGenerator()
     per_case: dict[str, dict[str, int]] = {}
     logical_queries = 0
     cache_hits = 0
     for case in cases:
-        case_queries = generator.generate(case.case_query, max_queries=max_queries)
+        case_queries = query_plans[case.case_id].queries[
+            :max_logical_queries_per_case
+        ]
         hits = sum(cache.contains(case.case_id, query.text) for query in case_queries)
         logical_queries += len(case_queries)
         cache_hits += hits

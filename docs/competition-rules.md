@@ -87,7 +87,9 @@ The leaderboard announcement says `chunk_id` is now an opaque hashed identifier 
 - Successful response: one top-ranked `{score, text, chunk_id}` result.
 - Rate limit: one request every five seconds per team.
 
-Production inference in this repository consumes only `case_id` and `case_query`; Public gold fields are evaluator-only.
+Production inference in this repository consumes only `case_id` and
+`case_query`; Public gold is restricted to offline training/target construction,
+evaluation, and error analysis.
 
 The private-repository `data/raw/ALQAC_private_test.json` contains 60 unique
 cases with exactly those two fields. It remains excluded from source bundles

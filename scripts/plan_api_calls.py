@@ -7,6 +7,11 @@ import json
 from alqac2026.case_retrieval import SQLiteEvidenceCache, build_api_plan
 from alqac2026.config import load_config, write_json
 from alqac2026.data import load_inference_cases
+from alqac2026.query_planning import (
+    DeterministicQueryComposer,
+    StoredQueryPlan,
+    create_query_planner,
+)
 
 
 def main() -> None:
@@ -31,12 +36,30 @@ def main() -> None:
     if args.limit is not None:
         cases = cases[: args.limit]
     cache_path = args.cache_db or config["paths"]["cache_db"]
+    planner = create_query_planner(config["case_retrieval"]["query_planner"])
+    composer = DeterministicQueryComposer()
+    query_plans = {}
+    try:
+        for case in cases:
+            result = planner.plan(case.case_query)
+            query_plans[case.case_id] = StoredQueryPlan(
+                fingerprint="preview",
+                planner_strategy=result.strategy,
+                planner_failure_type=result.failure_type,
+                plan=result.plan,
+                queries=tuple(composer.compose(result.plan)),
+            )
+    finally:
+        planner.release()
     cache = SQLiteEvidenceCache(cache_path)
     try:
         report = build_api_plan(
             cases,
             cache,
-            max_queries=int(config["case_retrieval"]["max_queries"]),
+            query_plans=query_plans,
+            max_logical_queries_per_case=int(
+                config["case_retrieval"]["max_logical_queries_per_case"]
+            ),
             approved_max_network_calls=args.approved_max_network_calls,
         )
     finally:

@@ -20,7 +20,14 @@ The exact string returned by the Case Content API is the only valid identifier s
 
 Official call counts accumulate across all runs and affect Penalized Case Recall. Real API calls require a reviewed purpose, successful responses must be cached, and experiments should reuse a shared evidence registry whenever possible.
 
-The live baseline/candidate policy uses exactly two queries per case (`court_decision` and normalized `case_query`). Every live run requires an explicit network-attempt cap. Public quality evaluation may use live retrieval only after explicit approval; low-level `cache-only` remains available for zero-call diagnostics. A preflight report must fit inside the live cap, and Colab keeps a local working database with fail-closed external backup.
+The live baseline/candidate policy uses two primary structured queries and at
+most one adaptive third query after an evidence-gate failure. Every live run
+uses a three-attempt per-case cap shared by semantic queries and the single
+allowed retry. The global hard cap is `planned_cases × 3`; cache hits spend no
+attempt. Public quality evaluation may use live retrieval only after explicit
+approval; low-level `cache-only` remains available for zero-call diagnostics.
+SQLite restores per-case counts on client recreation, and Colab keeps a local
+working database with fail-closed external backup.
 
 Rejected alternatives:
 
@@ -110,10 +117,13 @@ source bundles and exports and are never used as gold inference features.
 
 `notebooks/colab_public.ipynb` is the canonical Public evaluation entry point and
 `notebooks/colab_private.ipynb` is the canonical Private submission entry point.
-Both expose only `smoke` and `full`. Smoke pins an exact Git commit, runs the
-zero-API model gate, and then runs two live cases. Full requires the passing
-smoke gate on that commit and automatically resumes only its own checkpoint
-directory. A new `RUN_ID` is required to adopt newer code.
+Both expose only `smoke` and `full`. Smoke pins an exact Git commit and
+`workflow_config.json` fingerprint, runs the zero-API planner/model gate, and
+then runs two live cases. Full requires the passing smoke gate on that exact
+commit/config, reuses the shared query-plan/cache artifacts, and automatically
+resumes only its own checkpoint directory. Stage differences are restricted to
+case count, stage directory, case-count-derived network cap, and gate state. A
+new `RUN_ID` is required to adopt newer code or configuration.
 
 Public live retrieval requires explicit approval and produces local outcome/law
 evaluation. Private uses the organizer-provided Private law corpus and the
@@ -124,8 +134,7 @@ Hugging Face blob objects.
 Successful live responses, the attempt ledger, and pending-backup state share
 one transaction; a resumed client repairs pending backup before any cache hit or
 request. Validation and manifest bind the exact submission hash and byte length
-before export. LoRA loading remains optional, and Public gold is not enabled as
-fine-tuning data without a future organizer-confirmed contract change.
+before export. LoRA loading remains optional through `adapter_path`.
 
 ## D-013: Interpret API penalty per exact case identifier
 
@@ -139,3 +148,34 @@ Whether the organizer applies any additional team-wide cross-track accounting
 is not explicitly documented and requires organizer confirmation. Public live
 runs remain budgeted and cached because they still affect Public scoring and
 consume shared operational capacity.
+
+## D-014: LLM-assisted structured query planning with safe fallback
+
+**Status:** Accepted and `CPU/mock verified`
+
+The production planner first uses pinned open-weight `Qwen/Qwen3-0.6B` revision
+`c1899de289a04d12100db370d81485cdf75e47ca` with thinking off, deterministic
+generation, a 256-token output bound, and deadline-aware stopping. Output must
+match the structured schema, preserve query-grounded spans/terms, include
+required claim/remedy/object information, and avoid outcome inference.
+
+Any load, timeout, generation, JSON, grounding, or runtime failure selects the
+deterministic structured planner and does not fail the case. The planner runs
+as a separate stage and releases GPU resources before law retrieval/outcome
+models. Query plans are persisted under a versioned fingerprint and excluded
+from safe logs, submissions, and exports.
+
+## D-015: Public gold for offline training, never inference
+
+**Status:** Accepted
+
+Public Test gold may construct offline SFT/QLoRA targets and support evaluation
+or error analysis. Production-equivalent training input contains only
+`case_query`, cached Case API evidence, and retrieved law evidence; gold
+verdict, court text, or derived target fields never enter Private inference.
+
+Model selection uses case-grouped stratified five-fold out-of-fold evaluation,
+with all augmentations of one `case_id` in one fold. Reporting training-set
+accuracy after fitting all 50 cases is rejected. After hyperparameters are
+locked from out-of-fold evidence, a final adapter may be trained on all Public
+cases and loaded only through the existing `adapter_path` interface.

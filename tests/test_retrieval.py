@@ -5,7 +5,7 @@ from alqac2026.case_retrieval import (
     ApiBudgetExceeded,
     CachedCaseContentClient,
     CaseContentClient,
-    EvidenceQueryGenerator,
+    CaseEvidenceRetriever,
     SQLiteEvidenceCache,
     build_api_plan,
     cache_key,
@@ -13,6 +13,11 @@ from alqac2026.case_retrieval import (
 from alqac2026.law_retrieval import extract_law_citations, law_index_fingerprint
 from alqac2026.schemas import InferenceCase, LawArticle
 from alqac2026.law_retrieval import reciprocal_rank_fusion
+from alqac2026.query_planning import (
+    DeterministicQueryComposer,
+    DeterministicQueryPlanner,
+    StoredQueryPlan,
+)
 
 
 class FakeResponse:
@@ -100,12 +105,26 @@ def test_cache_key_normalizes_whitespace_and_case():
     )
 
 
-def test_two_query_policy_is_deterministic():
-    generator = EvidenceQueryGenerator()
-    queries = generator.generate("  Tranh chấp   Hợp đồng  ", max_queries=2)
-    assert [(item.query_type, item.text) for item in queries] == [
-        ("court_decision", "quyết định của tòa án tuyên xử"),
-        ("original", "tranh chấp hợp đồng"),
+def _stored_plan(case):
+    result = DeterministicQueryPlanner().plan(case.case_query)
+    return StoredQueryPlan(
+        fingerprint="test",
+        planner_strategy=result.strategy,
+        planner_failure_type=result.failure_type,
+        plan=result.plan,
+        queries=tuple(DeterministicQueryComposer().compose(result.plan)),
+    )
+
+
+def test_structured_query_policy_is_deterministic():
+    case = InferenceCase("case_1", "Tranh chấp hợp đồng, yêu cầu hủy hợp đồng.")
+    first = _stored_plan(case)
+    second = _stored_plan(case)
+    assert first == second
+    assert [query.query_type for query in first.queries] == [
+        "operative_verdict",
+        "remedy_scope",
+        "adaptive_missing_scope",
     ]
 
 
@@ -294,6 +313,43 @@ def test_api_budget_persists_across_client_resume(tmp_path):
     cache.close()
 
 
+def test_per_case_budget_persists_across_client_recreation(tmp_path):
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    first = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=10,
+        max_network_attempts_per_case=1,
+        run_key="stable-run",
+        request_interval_seconds=0,
+        session=FakeSession([FakeResponse(503, {})]),
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    with pytest.raises(RuntimeError):
+        first.retrieve("case_1", "first")
+    resumed_session = FakeSession([FakeResponse(200, {"results": []})])
+    resumed = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=1,
+        max_network_calls=10,
+        max_network_attempts_per_case=1,
+        run_key="stable-run",
+        request_interval_seconds=0,
+        session=resumed_session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    with pytest.raises(ApiBudgetExceeded, match="Per-case"):
+        resumed.retrieve("case_1", "second")
+    assert resumed_session.calls == []
+    cache.close()
+
+
 def test_timeout_is_counted_and_logged_without_secret(tmp_path):
     path = tmp_path / "cache.sqlite"
     cache = SQLiteEvidenceCache(path)
@@ -350,16 +406,145 @@ def test_malformed_success_response_is_not_cached(tmp_path):
 def test_api_plan_counts_cache_hits_without_network_calls(tmp_path):
     cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
     case = InferenceCase("case_1", "Tranh chấp hợp đồng")
-    first_query = EvidenceQueryGenerator().generate(case.case_query, 2)[0]
+    stored = _stored_plan(case)
+    first_query = stored.queries[0]
     cache.put(case.case_id, first_query.text, [])
     report = build_api_plan(
-        [case], cache, max_queries=2, approved_max_network_calls=1
+        [case],
+        cache,
+        query_plans={case.case_id: stored},
+        max_logical_queries_per_case=3,
+        approved_max_network_calls=1,
     )
-    assert report["logical_queries"] == 2
+    assert report["logical_queries"] == 3
     assert report["cache_hits"] == 1
-    assert report["cache_misses"] == 1
+    assert report["cache_misses"] == 2
     assert report["approved_max_network_calls"] == 1
     assert report["known_local_cumulative_attempts"] == 0
+    cache.close()
+
+
+class ScriptedRetrievalClient:
+    def __init__(self, responses, budget=3):
+        self.responses = iter(responses)
+        self.network_calls = 0
+        self.budget = budget
+
+    def retrieve(self, case_id, query, query_type="unknown"):
+        self.network_calls += 1
+        return next(self.responses)
+
+    def remaining_case_attempts(self, case_id):
+        return max(0, self.budget - self.network_calls)
+
+    def can_retrieve(self, case_id, query):
+        return self.remaining_case_attempts(case_id) > 0
+
+
+def _hit(chunk_id, text):
+    return {"chunk_id": chunk_id, "score": 1.0, "text": text}
+
+
+def test_sufficient_primary_evidence_does_not_call_adaptive_query():
+    case = InferenceCase(
+        "case_1",
+        "Nguyên đơn yêu cầu chia di sản thừa kế là thửa đất 107.",
+    )
+    client = ScriptedRetrievalClient(
+        [
+            [
+                _hit(
+                    "chunk-1",
+                    "Hội đồng xét xử quyết định chấp nhận yêu cầu chia di sản "
+                    "thừa kế là thửa đất 107.",
+                )
+            ],
+            [_hit("chunk-2", "Tòa án xác định thửa đất 107 là di sản.")],
+        ]
+    )
+    retriever = CaseEvidenceRetriever(client, {case.case_id: _stored_plan(case)})
+    evidence, calls = retriever.retrieve(case)
+    assert calls == 2
+    assert client.network_calls == 2
+    assert {item.chunk_id for item in evidence} == {"chunk-1", "chunk-2"}
+
+
+def test_insufficient_primary_evidence_calls_adaptive_query_when_budget_remains():
+    case = InferenceCase(
+        "case_1",
+        "Nguyên đơn yêu cầu chia di sản thừa kế là thửa đất 107.",
+    )
+    client = ScriptedRetrievalClient(
+        [
+            [_hit("chunk-1", "Nguyên đơn trình bày về thửa đất 107.")],
+            [_hit("chunk-2", "Đại diện Viện kiểm sát đề nghị Tòa án xem xét.")],
+            [
+                _hit(
+                    "chunk-3",
+                    "Tuyên xử: chấp nhận yêu cầu chia di sản thừa kế là "
+                    "thửa đất 107.",
+                )
+            ],
+        ]
+    )
+    retriever = CaseEvidenceRetriever(client, {case.case_id: _stored_plan(case)})
+    evidence, calls = retriever.retrieve(case)
+    assert calls == 3
+    assert client.network_calls == 3
+    assert {item.chunk_id for item in evidence} == {
+        "chunk-1",
+        "chunk-2",
+        "chunk-3",
+    }
+
+
+def test_retry_and_semantic_queries_share_one_per_case_budget(tmp_path):
+    case = InferenceCase(
+        "case_1",
+        "Nguyên đơn yêu cầu chia di sản thừa kế là thửa đất 107.",
+    )
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    session = FakeSession(
+        [
+            FakeResponse(503, {}),
+            FakeResponse(
+                200,
+                {
+                    "results": [
+                        _hit(
+                            "chunk-1",
+                            "Hội đồng xét xử quyết định chấp nhận yêu cầu chia "
+                            "di sản thừa kế là thửa đất 107.",
+                        )
+                    ]
+                },
+            ),
+            FakeResponse(
+                200,
+                {"results": [_hit("chunk-2", "Tòa án xác định thửa đất 107.")]},
+            ),
+        ]
+    )
+    client = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=2,
+        max_network_calls=3,
+        max_network_attempts_per_case=3,
+        run_key="run",
+        request_interval_seconds=0,
+        session=session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    retriever = CaseEvidenceRetriever(client, {case.case_id: _stored_plan(case)})
+    _, calls = retriever.retrieve(case)
+    assert calls == 3
+    assert len(session.calls) == 3
+    assert cache.run_attempt_stats("run")["per_case"]["case_1"][
+        "network_attempts"
+    ] == 3
     cache.close()
 
 
@@ -374,6 +559,34 @@ def test_cache_only_client_returns_hits_and_empty_misses_without_http(tmp_path):
     assert client.cache_hits == 1
     assert client.cache_misses == 1
     assert [event["status"] for event in events] == ["cache_hit", "cache_miss"]
+    cache.close()
+
+
+def test_cache_only_adaptive_hit_is_reused_without_attempt(tmp_path):
+    case = InferenceCase(
+        "case_1",
+        "Nguyên đơn yêu cầu chia di sản thừa kế là thửa đất 107.",
+    )
+    stored = _stored_plan(case)
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    cache.put(
+        case.case_id,
+        stored.queries[2].text,
+        [
+            _hit(
+                "chunk-3",
+                "Tuyên xử: chấp nhận yêu cầu chia di sản thừa kế là "
+                "thửa đất 107.",
+            )
+        ],
+    )
+    client = CachedCaseContentClient(cache)
+    retriever = CaseEvidenceRetriever(client, {case.case_id: stored})
+    evidence, calls = retriever.retrieve(case)
+    assert calls == 0
+    assert client.cache_misses == 2
+    assert client.cache_hits == 1
+    assert [item.chunk_id for item in evidence] == ["chunk-3"]
     cache.close()
 
 

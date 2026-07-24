@@ -53,6 +53,13 @@ def source_fingerprint(root: str | Path) -> str:
     return digest.hexdigest()
 
 
+def config_fingerprint(config: dict[str, Any]) -> str:
+    """Hash the resolved pipeline configuration independently of stage size."""
+    return hashlib.sha256(
+        json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def git_revision() -> tuple[str | None, bool | None]:
     try:
         revision = subprocess.check_output(
@@ -77,6 +84,10 @@ def build_manifest(config: dict[str, Any], corpus_path: str | Path) -> dict[str,
         "dirty_worktree": dirty,
         "corpus_sha256": sha256_file(corpus_path),
         "models": {
+            "query_planner": config["case_retrieval"]["query_planner"]["model_name"],
+            "query_planner_revision": config["case_retrieval"]["query_planner"].get(
+                "revision"
+            ),
             "outcome": config["prediction"]["model_name"],
             "outcome_revision": config["prediction"].get("revision"),
             "embedding": config["law_retrieval"]["embedding_model"],
@@ -85,6 +96,7 @@ def build_manifest(config: dict[str, Any], corpus_path: str | Path) -> dict[str,
             "reranker_revision": config["law_retrieval"].get("reranker_revision"),
         },
         "model_licenses": {
+            "query_planner": "Apache-2.0",
             "outcome": "Apache-2.0",
             "embedding": "Apache-2.0",
             "reranker": "Apache-2.0",

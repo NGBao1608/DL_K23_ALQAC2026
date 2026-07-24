@@ -101,12 +101,16 @@ def test_private_notebook_uses_private_inputs_without_evaluator():
 
 def test_runtime_check_has_no_case_api_or_team_token_dependency():
     text = Path("scripts/check_runtime.py").read_text(encoding="utf-8")
-    assert "case_retrieval" not in text
+    assert "CaseContentClient" not in text
+    assert "requests." not in text
     assert "ALQAC_TEAM_TOKEN" not in text
     assert '"api_network_attempts": 0' in text
+    assert 'report["stages"]["query_planner"]' in text
     assert 'report["stages"]["embedding"]' in text
     assert 'report["stages"]["reranker"]' in text
-    assert text.index('report["stages"]["embedding"]') < text.index(
+    assert text.index('report["stages"]["query_planner"]') < text.index(
+        'report["stages"]["embedding"]'
+    ) < text.index(
         'report["stages"]["reranker"]'
     ) < text.index('report["stages"]["generation"]')
 

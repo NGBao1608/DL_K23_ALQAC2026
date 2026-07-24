@@ -11,13 +11,13 @@ from .case_retrieval import (
     CachedCaseContentClient,
     CaseContentClient,
     CaseEvidenceRetriever,
-    EvidenceQueryGenerator,
     SQLiteEvidenceCache,
     build_api_plan,
 )
 from .config import (
     build_environment,
     build_manifest,
+    config_fingerprint,
     load_config,
     set_seed,
     sha256_file,
@@ -29,6 +29,11 @@ from .evaluation import build_error_analysis, evaluate_public, select_law_top_k
 from .law_retrieval import create_law_retriever, law_index_fingerprint
 from .pipeline import ALQACPipeline, CheckpointStore, PreparedCaseStore
 from .prediction import OutcomePredictor, create_predictor
+from .query_planning import (
+    DeterministicQueryComposer,
+    QueryPlanStore,
+    create_query_planner,
+)
 from .schemas import InferenceCase
 from .submission import build_submission, validate_submission
 
@@ -96,6 +101,7 @@ def run_experiment(
     law_index_dir: str | Path | None = None,
     selection_profile: str | Path | None = None,
     adapter_path: str | Path | None = None,
+    query_plan_store_path: str | Path | None = None,
 ) -> dict:
     config = load_config(config_path)
     mode = execution_mode or ("mock" if mock else "live")
@@ -135,6 +141,21 @@ def run_experiment(
     cases = load_inference_cases(input_path)
     if limit is not None:
         cases = cases[:limit]
+    retrieval_config = config["case_retrieval"]
+    max_attempts_per_case = int(
+        retrieval_config["max_network_attempts_per_case"]
+    )
+    derived_network_cap = len(cases) * max_attempts_per_case
+    if (
+        mode == "live"
+        and max_network_calls is not None
+        and max_network_calls > derived_network_cap
+    ):
+        raise ValueError(
+            "Live network cap exceeds planned_cases × "
+            f"max_network_attempts_per_case: {max_network_calls} > "
+            f"{derived_network_cap}"
+        )
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = (
         Path(resume_run)
@@ -145,6 +166,12 @@ def run_experiment(
     run_dir.mkdir(parents=True, exist_ok=True)
     resolved_path = run_dir / "config.resolved.json"
     current_source_fingerprint = source_fingerprint(Path(__file__).parent)
+    current_config_fingerprint = config_fingerprint(config)
+    query_plan_path = (
+        Path(query_plan_store_path)
+        if query_plan_store_path is not None
+        else run_dir / "query_plans.checkpoint.json"
+    )
     resolved_run = {
         "config": config,
         "execution": {
@@ -163,6 +190,8 @@ def run_experiment(
             ),
             "submission_law_top_k": selected_law_top_k,
             "source_fingerprint": current_source_fingerprint,
+            "config_fingerprint": current_config_fingerprint,
+            "query_plan_store_path": str(query_plan_path.resolve()),
         },
     }
     if resume_run and resolved_path.exists():
@@ -176,6 +205,7 @@ def run_experiment(
 
     manifest = build_manifest(config, corpus_path)
     manifest["source_sha256"] = current_source_fingerprint
+    manifest["config_sha256"] = current_config_fingerprint
     manifest["law_index"] = {
         "fingerprint": law_index_fingerprint(config["law_retrieval"], articles),
         "path": str(Path(config["paths"]["law_index"]).resolve()),
@@ -267,6 +297,38 @@ def run_experiment(
             cache.integrity_check()
 
         if to_prepare:
+            query_plans = {}
+            if not mock:
+                planner_config = retrieval_config["query_planner"]
+                planner = create_query_planner(planner_config)
+                composer = DeterministicQueryComposer()
+                plan_store = QueryPlanStore(query_plan_path)
+                try:
+                    for case in to_prepare:
+                        stored_plan = plan_store.get_or_create(
+                            case,
+                            planner=planner,
+                            composer=composer,
+                            configured_strategy=str(planner_config["strategy"]),
+                            model_revision=str(planner_config["revision"]),
+                            prompt_version=str(planner_config["prompt_version"]),
+                            composer_version=str(
+                                retrieval_config["composer_version"]
+                            ),
+                        )
+                        query_plans[case.case_id] = stored_plan
+                        _emit_progress(
+                            stage="query_planning",
+                            status="completed",
+                            case=case,
+                            index=case_positions[case.case_id],
+                            total=len(cases),
+                            planner_strategy=stored_plan.planner_strategy,
+                            planner_failure_type=stored_plan.planner_failure_type,
+                            query_count=len(stored_plan.queries),
+                        )
+                finally:
+                    planner.release()
             law_config = dict(config["law_retrieval"])
             law_config["index_dir"] = config["paths"]["law_index"]
             if mock:
@@ -275,13 +337,14 @@ def run_experiment(
             if mock:
                 case_retriever = EmptyCaseRetriever()
             else:
-                query_generator = EvidenceQueryGenerator()
                 api_plan = build_api_plan(
                     to_prepare,
                     cache,
-                    max_queries=int(config["case_retrieval"]["max_queries"]),
+                    query_plans=query_plans,
+                    max_logical_queries_per_case=int(
+                        retrieval_config["max_logical_queries_per_case"]
+                    ),
                     approved_max_network_calls=max_network_calls,
-                    query_generator=query_generator,
                 )
                 run_attempts_before = cache.run_attempt_stats(run_key)[
                     "network_attempts"
@@ -292,6 +355,7 @@ def run_experiment(
                 api_plan["remaining_approved_attempts"] = max(
                     0, int(max_network_calls or 0) - run_attempts_before
                 )
+                api_plan["derived_network_cap"] = derived_network_cap
                 write_json(run_dir / "api_plan.json", api_plan)
                 if mode == "cache-only":
                     client = CachedCaseContentClient(
@@ -299,14 +363,11 @@ def run_experiment(
                         progress_callback=emit_case_api_progress,
                     )
                 else:
-                    minimum_total_attempts = (
-                        run_attempts_before + api_plan["cache_misses"]
-                    )
-                    if minimum_total_attempts > int(max_network_calls):
+                    if run_attempts_before > int(max_network_calls):
                         raise ValueError(
-                            "Approved API budget is smaller than the run attempts "
-                            "already used plus current cache misses: "
-                            f"{max_network_calls} < {minimum_total_attempts}"
+                            "Approved API budget is smaller than attempts already "
+                            f"recorded for this run: {max_network_calls} < "
+                            f"{run_attempts_before}"
                         )
                     from dotenv import load_dotenv
 
@@ -314,24 +375,28 @@ def run_experiment(
                     token = os.getenv("ALQAC_TEAM_TOKEN", "")
                     client = CaseContentClient(
                         token=token,
-                        base_url=config["case_retrieval"]["api_base"],
+                        base_url=retrieval_config["api_base"],
                         cache=cache,
                         request_interval_seconds=float(
-                            config["case_retrieval"]["request_interval_seconds"]
+                            retrieval_config["request_interval_seconds"]
                         ),
                         timeout_seconds=int(
-                            config["case_retrieval"]["timeout_seconds"]
+                            retrieval_config["timeout_seconds"]
                         ),
-                        retries=int(config["case_retrieval"]["retries"]),
+                        retries=1 + int(retrieval_config["max_retries"]),
                         max_network_calls=max_network_calls,
+                        max_network_attempts_per_case=max_attempts_per_case,
                         run_key=run_key,
                         progress_callback=emit_case_api_progress,
                         backup_path=cache_backup_db,
                     )
                 case_retriever = CaseEvidenceRetriever(
                     client,
-                    query_generator=query_generator,
-                    max_queries=int(config["case_retrieval"]["max_queries"]),
+                    query_plans=query_plans,
+                    primary_queries=int(retrieval_config["primary_queries"]),
+                    max_logical_queries_per_case=int(
+                        retrieval_config["max_logical_queries_per_case"]
+                    ),
                 )
             preparation_pipeline = ALQACPipeline(
                 case_retriever, law_retriever, predictor=None

@@ -28,9 +28,9 @@ Case Content API calls accumulate permanently for each `case_id`. The reviewed
 Public and Private files have no overlapping identifiers, so Public calls should
 not directly increase a Private case's `c_i`; whether any additional team-wide
 cross-track accounting exists is `Needs confirmation`. Every live run still
-requires explicit approval and a hard network-attempt cap. The live
-baseline/candidate policy uses only `court_decision` plus the normalized
-`case_query` for each case.
+requires explicit approval and a hard network-attempt cap. The shared live
+policy uses structured planning, two primary queries, and at most one adaptive
+third query after an evidence-sufficiency failure.
 
 Official participation rules allow only open-weight models with fewer than 10 billion parameters, prohibit proprietary/non-open model APIs, and prohibit externally annotated legal QA or legal entailment datasets. The current Qwen3-8B stack fits the model contract.
 

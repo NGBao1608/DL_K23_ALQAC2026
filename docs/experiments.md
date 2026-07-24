@@ -1,6 +1,6 @@
 # Experiment Registry
 
-**Last updated:** 2026-07-23
+**Last updated:** 2026-07-24
 
 Only reproducible artifacts may be recorded as results. Every real API run must include cumulative-call risk in its notes, even though the repository can observe only run-local network calls and the organizer owns the official cumulative count.
 
@@ -10,12 +10,18 @@ Only reproducible artifacts may be recorded as results. Every real API run must 
 |---|---|---|---|---:|---:|---|
 | CPU mock | `baseline.yaml` | Local CPU | CPU/mock verified | N/A | N/A | Plumbing only; mock metrics are not model results. |
 | BM25 retrieval | `baseline.yaml` | Local CPU | CPU/mock verified | N/A | N/A | 50 cases: Recall@5 `0.02373`, Recall@10 `0.03756`; artifact `outputs/retrieval_bm25.json`. |
+| Structured Case Retrieval plumbing | shared baseline/candidate retrieval config | Local CPU/mock | CPU/mock verified | N/A | N/A | 50 Public inputs deterministically produced 150 candidate queries; observed length range 8–25 whitespace tokens. Unit tests cover LLM success/fallback classes, grounded validation, evidence gate, adaptive query 3, retry/case caps, resume, cache-only, safe logs, and artifact exclusion. No scored API call was made. |
 | Citation-aware hybrid candidate | `candidate.yaml` | Kaggle T4 | implemented | Not measured | Not measured | Exact citations expand the reranker pool; requires a new two-case smoke run. |
 | Decision-first Qwen3 candidate | `candidate.yaml` | Kaggle T4 | implemented | Not measured | N/A | Uses the official partial-label boundary; no clean `GPU/API verified` artifact is recorded. |
 | Split Drive-first Colab candidate path | `candidate.yaml` | Local tests only | CPU/mock verified | Not measured | Not measured | Public/Private smoke-full orchestration, source pinning, automatic model gate, Private corpus validation, token budgeting, resume-safe pending SQLite backup, submission-hash binding, notebook syntax, and safe export are covered; no live T4 result is claimed. |
 | Candidate smoke artifact `334997098` | `candidate.yaml` | Kaggle T4 | implemented | N/A | N/A | Commit `495f178eafe5232ded1be4487f94c5360836be5c`; two Case API attempts returned HTTP 200 and produced two cache rows, then execution stopped during `AITeamVN/Vietnamese_Embedding` download before context preparation or prediction completed. |
 
 The incomplete candidate smoke is diagnostic evidence only. Its manifest remains `running` with zero completed cases, so it does not promote the candidate to `GPU/API verified` and must not be submitted.
+
+The structured retrieval row is plumbing/proxy evidence only. Planner model
+loading, deadline behavior on T4, real BM25 segment quality, and the
+evidence-sufficiency gate against official API responses remain unverified on
+GPU/API.
 
 ## Official format revision
 

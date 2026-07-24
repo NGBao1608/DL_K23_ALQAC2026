@@ -4,6 +4,7 @@ import pytest
 
 import alqac2026.runner as runner
 from alqac2026.schemas import InferenceCase, LawArticle, LawEvidence
+from alqac2026.query_planning import DeterministicQueryPlanner
 
 
 class FakeLawRetriever:
@@ -22,6 +23,9 @@ def _patch_small_run(monkeypatch):
     )
     monkeypatch.setattr(
         runner, "create_law_retriever", lambda articles, config: FakeLawRetriever()
+    )
+    monkeypatch.setattr(
+        runner, "create_query_planner", lambda config: DeterministicQueryPlanner()
     )
 
 
@@ -139,6 +143,28 @@ def test_mock_run_emits_safe_structured_per_case_progress(
     assert "case_query" not in completed
 
 
+def test_mock_pipeline_does_not_load_query_planner_or_api(tmp_path, monkeypatch):
+    _patch_small_run(monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "create_query_planner",
+        lambda config: (_ for _ in ()).throw(AssertionError("planner loaded")),
+    )
+    monkeypatch.setattr(
+        runner,
+        "CaseContentClient",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("API client")),
+    )
+    result = runner.run_experiment(
+        "configs/baseline.yaml",
+        "input.json",
+        resume_run=tmp_path / "mock",
+        mock=True,
+        limit=1,
+    )
+    assert result["validation"]["status"] == "PASS"
+
+
 def test_cache_only_run_uses_real_pipeline_without_network_or_token(
     tmp_path, monkeypatch
 ):
@@ -148,7 +174,13 @@ def test_cache_only_run_uses_real_pipeline_without_network_or_token(
         "create_predictor",
         lambda config: runner.OutcomePredictor(runner.FixedBackend()),
     )
-    monkeypatch.setenv("ALQAC_TEAM_TOKEN", "must-not-be-read")
+    monkeypatch.setattr(
+        runner.os,
+        "getenv",
+        lambda name, default="": (_ for _ in ()).throw(
+            AssertionError(f"secret environment read: {name}")
+        ),
+    )
     run_dir = tmp_path / "cache-only"
     result = runner.run_experiment(
         "configs/candidate.yaml",
@@ -162,7 +194,7 @@ def test_cache_only_run_uses_real_pipeline_without_network_or_token(
     api_stats = json.loads((run_dir / "api_stats.json").read_text(encoding="utf-8"))
     assert result["validation"]["status"] == "PASS"
     assert api_plan["execution_mode"] == "cache-only"
-    assert api_plan["cache_misses"] == 2
+    assert api_plan["cache_misses"] == 3
     assert api_stats["run_network_attempts"] == 0
 
 

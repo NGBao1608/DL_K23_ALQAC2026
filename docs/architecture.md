@@ -1,6 +1,6 @@
 # Architecture — Synchronized Legacy View
 
-**Last synchronized:** 2026-07-23
+**Last synchronized:** 2026-07-24
 
 **Canonical source:** [`pipeline.md`](pipeline.md)
 
@@ -11,7 +11,9 @@ This filename is retained for existing links. `pipeline.md` is the canonical imp
 ```text
 case_id + case_query
         │
-        ├── Case Content API ───────────────→ case evidence
+        ├── structured planner + fallback
+        │       └── 2 primary queries + gate + optional query 3
+        ├──────────────────────────────────→ case evidence
         ├── BM25 / dense + RRF + reranker ─→ law evidence
         └── Qwen3-8B 4-bit ────────────────→ outcome label
                                                    │
@@ -19,7 +21,9 @@ case_id + case_query
                                     builder → validator → submission.json
 ```
 
-Public development uses the same private-like production pipeline. Public gold annotations enter only the evaluator after prediction.
+Public development uses the same private-like production pipeline. Public gold
+annotations may enter offline training/evaluation code but never production
+inference.
 
 ## Data boundary
 
@@ -36,12 +40,19 @@ Status: `CPU/mock verified`.
 
 ## Case evidence stage
 
-Live production retrieval uses exactly two deterministic queries
-(`court_decision` and normalized `case_query`). The canonical Public quality
-workflow uses live retrieval after explicit approval; low-level zero-network
+Live production retrieval uses a pinned small LLM structured planner with
+deterministic fallback, two primary composed queries, and an optional adaptive
+third query after the evidence gate fails. The canonical Public quality workflow
+uses live retrieval after explicit approval; low-level zero-network
 `cache-only` remains available for diagnostics.
 
-The official call count is permanent across runs. Live preflight, a hard network cap, and cache/checkpoint reuse are therefore part of scoring safety. A successful response, ledger row, and pending-backup marker share one transaction. Every attempt is backed up to external SQLite before the next request; a new live client repairs pending state before any cache hit or request, and backup failure stops the run.
+The official call count is permanent across runs. Live preflight, a three-attempt
+per-case cap shared by retry/semantic queries, and cache/checkpoint reuse are
+therefore part of scoring safety. The global cap is planned cases multiplied by
+three. A successful response, ledger row, and pending-backup marker share one
+transaction. Every attempt is backed up to external SQLite before the next
+request; a new live client restores per-case counts and repairs pending state
+before any cache hit or request, and backup failure stops the run.
 
 Returned `chunk_id` values are treated as opaque throughout the pipeline and validator. No `_chunk_` or `_seg_` prefix is inferred.
 
@@ -72,7 +83,11 @@ Status: BM25 is `CPU/mock verified`; the hybrid candidate is `implemented`.
 
 The predictor uses pinned `Qwen/Qwen3-8B`, NF4 4-bit, FP16 compute, deterministic generation, and thinking disabled. Token-aware context protects the prompt/query/final instruction under a 6,144-token cap and allocates remaining space to prioritized case evidence and five law articles.
 
-The model returns structured main claim, accepted scope, acceptance ratio, reasoning, and label. Numeric ratios enforce the official boundary; partial or inconsistent results receive a verifier pass, and malformed output receives one repair. An optional approved PEFT adapter may be loaded, but no fine-tuning dataset path is enabled.
+The model returns structured main claim, accepted scope, acceptance ratio,
+reasoning, and label. Numeric ratios enforce the official boundary; partial or
+inconsistent results receive a verifier pass, and malformed output receives one
+repair. An approved PEFT adapter may be loaded through `adapter_path`; the
+case-grouped five-fold Public training workflow is not implemented yet.
 
 Status: `implemented`; a clean refreshed `GPU/API verified` run is pending.
 
@@ -87,9 +102,10 @@ Public evaluation supports Outcome Accuracy, Micro Law Evidence F1, law Recall@5
 ## Runtime and artifacts
 
 The canonical Colab workflow exposes only `smoke` and `full`. Smoke pins one
-exact Git commit, runs `scripts/check_runtime.py` to load embedding, reranker,
-and Qwen before any live request, then predicts two cases. Full requires that
-gate on the same commit and automatically resumes its own full checkpoints.
+exact Git commit/config fingerprint, runs `scripts/check_runtime.py` to load
+planner, embedding, reranker, and Qwen before any live request, then predicts
+two cases. Full requires that gate on the same commit/config and automatically
+resumes its own full checkpoints while reusing shared plans/cache.
 `colab_public.ipynb` stores Public evaluation artifacts;
 `colab_private.ipynb` uses the Private law corpus and stores submission
 artifacts. SQLite/model/index working copies stay local while reusable

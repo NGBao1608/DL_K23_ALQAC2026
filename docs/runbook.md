@@ -87,22 +87,23 @@ Smoke performs all safety gates in one operation:
 1. resolve the selected branch and persist its exact commit in
    `source_pin.json`;
 2. restore the shared SQLite cache and the fingerprinted law index;
-3. run embedding, reranker, and Qwen through `scripts/check_runtime.py` with
-   zero Case Content API attempts; and
-4. run exactly two live cases with a hard cap of four network attempts.
+3. run the query planner, embedding, reranker, and Qwen through
+   `scripts/check_runtime.py` with zero Case Content API attempts; and
+4. run exactly two live cases with a hard cap of six network attempts
+   (`2 cases × 3 attempts`).
 
 Full requires `runtime_check.json` and `smoke_gate.json` from the same pinned
-commit. It uses its own `full/` directory and automatically resumes that
-directory after interruption. Smoke checkpoints are never promoted into the
-full prediction set; only the shared evidence cache and law index are reused.
-Create a new `RUN_ID` to adopt newer source code or a different workflow
-configuration.
+commit and `workflow_config.json` fingerprint. It uses its own `full/`
+directory and automatically resumes that directory after interruption. Smoke
+checkpoints are never promoted into the full prediction set; the shared query
+plans, evidence cache, and law index are reused. Create a new `RUN_ID` to adopt
+newer source code or a different workflow configuration.
 
 ## 4. Public quality evaluation
 
 Public quality evaluation needs real case evidence, so the canonical Public
 notebook uses live retrieval. Set `APPROVE_PUBLIC_API_CALLS=True` only after
-reviewing the two-query policy and budget. The reviewed Public and Private files
+reviewing the two-primary-plus-adaptive policy and budget. The reviewed Public and Private files
 have zero overlapping `case_id` values. Because the official formula defines
 the penalty per case, Public calls should not directly increase a Private
 case's `c_i`; `Needs confirmation`: whether the organizer applies any
@@ -111,11 +112,10 @@ additional team-wide cross-track accounting.
 Run:
 
 1. `STAGE='smoke'` with a new Public `RUN_ID`; require two completed cases,
-   `validation=PASS`, a passing zero-call model gate, and no more than four
+   `validation=PASS`, a passing zero-call model gate, and no more than six
    network attempts.
-2. Keep the same `RUN_ID`, set `STAGE='full'`, and run all 50 cases. The first
-   full preflight persists `full_budget.json` as current cache misses plus the
-   selected retry reserve.
+2. Keep the same `RUN_ID`, set `STAGE='full'`, and run all 50 cases with the
+   same configuration fingerprint and cap `50 × 3 = 150`.
 3. Require 50 completed predictions, `validation=PASS`, Outcome Accuracy, Law
    Micro F1, Recall@5, error analysis, and `selection_profile.json`.
 
@@ -144,9 +144,10 @@ Run:
 1. `STAGE='smoke'` with a new Private `RUN_ID`. The notebook validates both
    source-pinned Private files, builds or restores an index fingerprinted from the Private
    law corpus, runs the zero-call model gate, and predicts exactly two live
-   cases with cap four. Never upload this limited output.
+   cases with cap six. Never upload this limited output.
 2. Keep the same Private `RUN_ID`, set `STAGE='full'`, and run all 60 cases.
-   The full run reuses the shared API cache, persists its own budget, and
+   The full run reuses the shared query plans/API cache, derives cap
+   `60 × 3 = 180`, and
    automatically resumes its own checkpoints after interruption.
 3. Require 60 completed cases, `validation=PASS`, exact opaque API identifiers,
    corpus-valid `{law_id, aid}`, a file below 10 MB, and matching submission

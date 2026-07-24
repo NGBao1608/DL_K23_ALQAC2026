@@ -66,15 +66,18 @@ SYSTEM_PROMPT = BASELINE_SYSTEM_PROMPT
 
 
 PRIORITY = {
-    "court_decision": 0,
-    "accepted_claim": 1,
-    "rejected_claim": 2,
-    "court_reasoning": 3,
-    "applied_law": 4,
-    "court_fee": 5,
-    "dispute_type": 6,
-    "original": 7,
-    "unknown": 8,
+    "operative_verdict": 0,
+    "adaptive_missing_scope": 1,
+    "remedy_scope": 2,
+    "court_decision": 3,
+    "accepted_claim": 4,
+    "rejected_claim": 5,
+    "court_reasoning": 6,
+    "applied_law": 7,
+    "court_fee": 8,
+    "dispute_type": 9,
+    "original": 10,
+    "unknown": 11,
 }
 
 

@@ -52,7 +52,7 @@ Where:
 
 `PenalizedCaseRecall` is case-evidence recall multiplied by this efficiency factor. Teams do not submit `c_i`; the organizer calculates it from server logs.
 
-### Critical clarification: calls are cumulative per case
+### Operational note: calls are cumulative per case
 
 Case Content API calls accumulate across every run and experiment, and logs are
 append-only. The official formula defines `c_i` per case. The reviewed Public
@@ -62,8 +62,8 @@ case's `c_i`.
 
 `Needs confirmation`: the official pages do not explicitly state whether any
 additional team-wide cross-track accounting is applied despite distinct case
-identifiers. Every real API call therefore remains part of a reviewed,
-cache-backed team budget.
+identifiers. This open question does not change the team retrieval design:
+every live run remains cache-backed and capped.
 
 ## Official requirement: submission and leaderboard
 
@@ -122,7 +122,7 @@ The organizer-provided files currently present in this repository are:
 
 - `ALQAC2026_public_test.json`: 50 labeled Public Test cases;
 - `corpus_law_pub.json`: 18 law documents containing 3,352 articles; and
-- local ignored `ALQAC_private_test.json`: 60 unlabeled Private Test cases.
+- private-repository-only `ALQAC_private_test.json`: 60 unlabeled Private Test cases.
 
 The official competition website defines test input as a JSON array containing only `case_id` and `case_query`; it explicitly excludes the gold verdict, court reasoning, court decision, and gold evidence.
 
@@ -169,6 +169,21 @@ This repository currently adopts stricter internal safeguards:
 - leaderboard upload is always manual.
 
 These are team implementation decisions unless explicitly identified above as official requirements.
+
+### User-approved offline Public-data policy
+
+The Public Test gold fields may be used offline for supervised target
+construction, fine-tuning, evaluation, and error analysis. This is a team
+decision, not an organizer statement. Production-equivalent model input remains
+limited to `case_query`, cached Case API evidence, and retrieved law evidence;
+Public gold must not become a Private inference feature.
+
+Reported Public accuracy must be out-of-fold or held-out. The team must not
+train on all 50 Public cases and then report accuracy on those same 50 cases.
+For small-data fine-tuning, use a group-preserving stratified five-fold design
+by `case_id`, keep all augmentations of one case in one fold, lock
+hyperparameters from out-of-fold results, and only then train a final adapter on
+all Public cases.
 
 ## Open questions summary
 

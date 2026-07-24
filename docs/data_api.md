@@ -18,7 +18,10 @@ judgment_text, raw_sha256, related_law_provisions, source_filename,
 verdict_label
 ```
 
-Only `case_id` and `case_query` may enter production inference. All other fields are Public Test metadata or gold annotations and may be read only by evaluation and error-analysis code.
+Only `case_id` and `case_query` may enter the production data loader. All other
+fields are Public Test metadata or gold annotations. They may be used only by
+offline training/target construction, evaluation, and error-analysis code, and
+must never enter Private production inference.
 
 Official inference item:
 
@@ -186,15 +189,36 @@ Team rules:
 
 ## Current repository behavior
 
-- `case_retrieval.py` implements throttling, bounded retry, SQLite caching, de-duplication, and safe error diagnostics.
-- The current baseline/candidate configs use exactly two deterministic queries per case: `court_decision` and normalized `case_query`.
-- `scripts/plan_api_calls.py` reports cache hits/misses without contacting the API.
+- `query_planning.py` implements the structured deterministic planner, pinned
+  `Qwen/Qwen3-0.6B` LLM-assisted planner, validation/fallback, deterministic
+  query composer, evidence-sufficiency gate, and fingerprinted query-plan store.
+- Planner output must copy query spans/lexical terms, must not infer an outcome,
+  and falls back safely on load, timeout, generation, JSON, schema, or grounding
+  failure.
+- Baseline and candidate use two primary structured queries. A third adaptive
+  query is issued only when the first two results fail the evidence gate and
+  per-case budget remains.
+- `case_retrieval.py` implements throttling, at most one retry, SQLite caching,
+  exact `chunk_id` de-duplication, global/per-case hard caps, and safe error
+  diagnostics.
+- `scripts/plan_api_calls.py` reports a structured upper-bound plan and
+  cache hits/misses without contacting the API.
 - Every live runner requires `--max-network-calls`; cache-only never constructs the HTTP client and records zero network attempts.
+- The default hard cap is three network attempts per case. Semantic queries and
+  retries share it; cache hits spend no attempt. A recreated client restores
+  per-case counts from the SQLite ledger for the same run key.
 - SQLite commits a successful response, its safe attempt ledger row, and a pending-backup marker atomically. With external backup configured, every attempt must be backed up successfully before the next request. A resumed live client repairs pending state before returning a cache hit or sending another request; restore preserves a newer local database while that marker is pending.
-- API responses are checkpointed into prepared contexts for resume.
+- API responses are checkpointed into prepared contexts for resume. Query plans
+  are separately persisted by a fingerprint containing `case_id`, the raw
+  `case_query` SHA-256, configured planner strategy/model revision, planner
+  prompt version, and composer version.
 - `chunk_id` is stored as a string and can carry opaque hashed values.
 - During retrieval, the runner emits safe `ALQAC_PROGRESS` events for cache hits/misses, HTTP request start/completion, HTTP errors, exceptions, and scheduled retries. Events include only `case_id`, query type, attempt metadata, status metadata, and latency; they never include the query text, response text, headers, or token.
 
 ## Verification status
 
-Private input loading, opaque identifier storage/validation, two-query generation, cache planning, hard budgets, retries, and the local call ledger are `CPU/mock verified`. The live OpenAPI contract was checked without a scored retrieval call; the current end-to-end pipeline still lacks a completed `GPU/API verified` artifact.
+Private input loading, opaque identifier storage/validation, structured
+fallback planning, adaptive-query gating, cache planning, hard budgets, retries,
+resume-safe per-case ledger counts, and safe logging are `CPU/mock verified`.
+The pinned planner and end-to-end retrieval path still lack a completed
+`GPU/API verified` artifact.

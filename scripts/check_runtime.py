@@ -16,6 +16,7 @@ from alqac2026.config import (
 from alqac2026.data import load_inference_cases, load_law_corpus
 from alqac2026.law_retrieval import HybridLawRetriever, create_law_retriever
 from alqac2026.prediction import create_predictor
+from alqac2026.query_planning import create_query_planner
 
 
 def main() -> None:
@@ -63,6 +64,21 @@ def main() -> None:
     articles = load_law_corpus(config["paths"]["corpus"])
     case = load_inference_cases(args.input)[0]
 
+    started = time.perf_counter()
+    planner = create_query_planner(config["case_retrieval"]["query_planner"])
+    try:
+        planner_result = planner.plan(case.case_query)
+    finally:
+        planner.release()
+    if not planner_result.plan.main_claim:
+        raise RuntimeError("Runtime planner and fallback did not produce main_claim")
+    report["stages"]["query_planner"] = {
+        "status": "PASS",
+        "seconds": round(time.perf_counter() - started, 3),
+        "strategy": planner_result.strategy,
+        "failure_type": planner_result.failure_type,
+    }
+
     law_config = dict(config["law_retrieval"])
     law_config["strategy"] = "hybrid_rerank"
     law_config["index_dir"] = config["paths"]["law_index"]
@@ -108,6 +124,10 @@ def main() -> None:
     }
     report["status"] = "PASS"
     report["models"] = {
+        "query_planner": config["case_retrieval"]["query_planner"]["model_name"],
+        "query_planner_revision": config["case_retrieval"]["query_planner"].get(
+            "revision"
+        ),
         "embedding": law_config.get("embedding_model"),
         "embedding_revision": law_config.get("embedding_revision"),
         "reranker": law_config.get("reranker_model"),

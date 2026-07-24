@@ -100,6 +100,9 @@ def test_export_run_contains_only_allowlisted_artifacts(tmp_path):
     )
     (run_dir / "ALQAC_private_test.json").write_text("private", encoding="utf-8")
     (run_dir / "contexts.checkpoint.json").write_text("context", encoding="utf-8")
+    (run_dir / "query_plans.checkpoint.json").write_text(
+        "planner artifact", encoding="utf-8"
+    )
 
     export_dir = export_run(run_dir, tmp_path / "export")
     exported = {path.name for path in export_dir.iterdir()}
