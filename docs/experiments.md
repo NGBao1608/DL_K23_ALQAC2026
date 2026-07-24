@@ -16,6 +16,7 @@ Only reproducible artifacts may be recorded as results. Every real API run must 
 | Split Drive-first Colab candidate path | `candidate.yaml` | Local tests only | CPU/mock verified | Not measured | Not measured | Public/Private smoke-full orchestration, source pinning, automatic model gate, Private corpus validation, token budgeting, resume-safe pending SQLite backup, submission-hash binding, notebook syntax, and safe export are covered; no live T4 result is claimed. |
 | Candidate smoke artifact `334997098` | `candidate.yaml` | Kaggle T4 | implemented | N/A | N/A | Commit `495f178eafe5232ded1be4487f94c5360836be5c`; two Case API attempts returned HTTP 200 and produced two cache rows, then execution stopped during `AITeamVN/Vietnamese_Embedding` download before context preparation or prediction completed. |
 | Public candidate diagnostic `public-candidate-v4` | `candidate.yaml` | Colab T4 + live API | implemented | Not measured | Not measured | Commit `ec1675edaebc57998105db64f8a62724c6dbe324`; smoke completed, but full stopped before prediction. Query plans used the LLM for 2/50 cases and deterministic fallback for 48/50, all recorded as `ValueError`. Full recorded 22 attempts, 20 successful calls, 6 cache hits, and nine prepared contexts; `case_8219` consumed 3 attempts with one success before an inline retry raised `ApiBudgetExceeded`. Diagnostic only; not `GPU/API verified` and not submit-ready. |
+| Public candidate diagnostic `public-candidate-v5` | `candidate.yaml` | Colab T4 + live API | implemented | 1/2 | Not promoted | Commit `89da008156e42e5cec8e4f81bb03a6af0bda2e3d`; both cases completed and submission validation passed. The run used 6 attempts with 5 successful calls. `case_4337` received one `server_error`, then completed both primary logical queries through the bounded retry, but the pre-fix status logic retained that recovered error as `degraded_cases=1` and rejected the smoke gate. Diagnostic only; the classification fix remains `CPU/mock verified` until a new source-pinned smoke run. |
 
 The incomplete candidate smoke is diagnostic evidence only. Its manifest remains `running` with zero completed cases, so it does not promote the candidate to `GPU/API verified` and must not be submitted.
 
@@ -28,6 +29,11 @@ The `public-candidate-v4` artifact motivated prompt/composer v2, the quantized
 8B planner candidate, classified planner failures, primary-first retry
 allocation, and complete-case degradation. Those replacements are only
 `CPU/mock verified` until a new two-case smoke uses a new `RUN_ID`.
+
+The `public-candidate-v5` artifact showed that attempt history and final
+degradation state must be separated. A bounded retry that succeeds is now
+reported as a recovered retrieval error; an unresolved final failure still
+degrades the case and blocks smoke.
 
 ## Official format revision
 

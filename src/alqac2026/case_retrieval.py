@@ -386,6 +386,7 @@ class CaseContentClient:
         )
         self.per_case_cache_hits: dict[str, int] = defaultdict(int)
         self.per_case_failure_codes: dict[str, list[str]] = defaultdict(list)
+        self.per_case_recovered_failure_codes: dict[str, list[str]] = defaultdict(list)
 
     def _emit_progress(self, **event: object) -> None:
         if self.progress_callback is None:
@@ -440,6 +441,10 @@ class CaseContentClient:
     def record_retrieval_failure(self, case_id: str, code: str) -> None:
         if code not in self.per_case_failure_codes[case_id]:
             self.per_case_failure_codes[case_id].append(code)
+
+    def record_retrieval_recovery(self, case_id: str, code: str) -> None:
+        if code not in self.per_case_recovered_failure_codes[case_id]:
+            self.per_case_recovered_failure_codes[case_id].append(code)
 
     def _backup_cache(self) -> None:
         if self.backup_path is not None:
@@ -684,6 +689,7 @@ class CachedCaseContentClient:
         self.cache_misses = 0
         self.per_case_cache_hits: dict[str, int] = defaultdict(int)
         self.per_case_failure_codes: dict[str, list[str]] = defaultdict(list)
+        self.per_case_recovered_failure_codes: dict[str, list[str]] = defaultdict(list)
 
     def remaining_case_attempts(self, case_id: str) -> int:
         return 0
@@ -694,6 +700,10 @@ class CachedCaseContentClient:
     def record_retrieval_failure(self, case_id: str, code: str) -> None:
         if code not in self.per_case_failure_codes[case_id]:
             self.per_case_failure_codes[case_id].append(code)
+
+    def record_retrieval_recovery(self, case_id: str, code: str) -> None:
+        if code not in self.per_case_recovered_failure_codes[case_id]:
+            self.per_case_recovered_failure_codes[case_id].append(code)
 
     def _emit_progress(self, **event: object) -> None:
         if self.progress_callback is None:
@@ -769,11 +779,17 @@ class CaseEvidenceRetriever:
             if recorder is not None:
                 recorder(case.case_id, code)
 
-        def execute(query) -> tuple[bool, CaseApiRequestError | None]:
+        def record_recovery(code: str) -> None:
+            recorder = getattr(self.client, "record_retrieval_recovery", None)
+            if recorder is not None:
+                recorder(case.case_id, code)
+
+        def execute(
+            query,
+        ) -> tuple[bool, CaseApiRequestError | None, str | None]:
             if not self.client.can_retrieve(case.case_id, query.text):
-                record_failure("budget_exhausted")
                 policy_event("query_skipped_budget", query)
-                return False, None
+                return False, None, "budget_exhausted"
             try:
                 hits = self.client.retrieve(
                     case.case_id,
@@ -782,11 +798,9 @@ class CaseEvidenceRetriever:
                     max_attempts=1,
                 )
             except ApiBudgetExceeded:
-                record_failure("budget_exhausted")
                 policy_event("query_skipped_budget", query)
-                return False, None
+                return False, None, "budget_exhausted"
             except CaseApiRequestError as error:
-                record_failure(error.code)
                 policy_event(
                     "query_failed",
                     query,
@@ -794,7 +808,7 @@ class CaseEvidenceRetriever:
                     retryable=error.retryable,
                     status_code=error.status_code,
                 )
-                return False, error
+                return False, error, error.code
             for hit in hits:
                 item = CaseEvidence(
                     chunk_id=str(hit["chunk_id"]),
@@ -806,13 +820,16 @@ class CaseEvidenceRetriever:
                 previous = evidence.get(item.chunk_id)
                 if previous is None or item.score > previous.score:
                     evidence[item.chunk_id] = item
-            return True, None
+            return True, None, None
 
         primary_success: dict[int, bool] = {}
+        primary_failure_codes: dict[int, str] = {}
         retry_candidates: list[tuple[int, object]] = []
         for index, query in enumerate(queries[: self.primary_queries]):
-            success, error = execute(query)
+            success, error, failure_code = execute(query)
             primary_success[index] = success
+            if failure_code is not None:
+                primary_failure_codes[index] = failure_code
             if error is not None and error.retryable:
                 retry_candidates.append((index, query))
 
@@ -822,8 +839,15 @@ class CaseEvidenceRetriever:
             if self.client.can_retrieve(case.case_id, query.text):
                 retry_used = True
                 policy_event("retry_scheduled", query, retry_scope="case")
-                success, _ = execute(query)
+                previous_failure = primary_failure_codes.get(index)
+                success, _, failure_code = execute(query)
                 primary_success[index] = success
+                if success:
+                    primary_failure_codes.pop(index, None)
+                    if previous_failure is not None:
+                        record_recovery(previous_failure)
+                elif failure_code is not None:
+                    primary_failure_codes[index] = failure_code
 
         sufficiency = evaluate_evidence_sufficiency(raw_evidence, stored_plan.plan)
         if (
@@ -839,7 +863,7 @@ class CaseEvidenceRetriever:
             )
         ):
             adaptive = queries[self.primary_queries]
-            success, error = execute(adaptive)
+            success, error, adaptive_failure_code = execute(adaptive)
             if (
                 not success
                 and error is not None
@@ -848,7 +872,16 @@ class CaseEvidenceRetriever:
                 and self.client.can_retrieve(case.case_id, adaptive.text)
             ):
                 policy_event("retry_scheduled", adaptive, retry_scope="case")
-                execute(adaptive)
+                previous_failure = adaptive_failure_code
+                success, _, adaptive_failure_code = execute(adaptive)
+                if success:
+                    adaptive_failure_code = None
+                    if previous_failure is not None:
+                        record_recovery(previous_failure)
+            if not success and adaptive_failure_code is not None:
+                record_failure(adaptive_failure_code)
+        for failure_code in primary_failure_codes.values():
+            record_failure(failure_code)
         return list(evidence.values()), self.client.network_calls - before
 
 

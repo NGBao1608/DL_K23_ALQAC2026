@@ -464,6 +464,17 @@ def run_experiment(
                     if client
                     else []
                 )
+                case_status.setdefault(case.case_id, {})[
+                    "retrieval_recovered_failure_codes"
+                ] = (
+                    list(
+                        client.per_case_recovered_failure_codes.get(
+                            case.case_id, []
+                        )
+                    )
+                    if client
+                    else []
+                )
                 write_json(case_status_path, case_status)
                 _emit_progress(
                     stage="preparation",
@@ -624,6 +635,13 @@ def run_experiment(
                 "retrieval_failure_codes"
             )
         }
+        retrieval_recovered_case_ids = {
+            case.case_id
+            for case in cases
+            if case_status.get(case.case_id, {}).get(
+                "retrieval_recovered_failure_codes"
+            )
+        }
         degraded_case_ids = (
             fallback_case_ids
             | retrieval_degraded_case_ids
@@ -634,6 +652,7 @@ def run_experiment(
                 "degraded_cases": len(degraded_case_ids),
                 "fallback_predictions": len(fallback_case_ids),
                 "planner_fallbacks": len(planner_fallback_case_ids),
+                "recovered_retrieval_cases": len(retrieval_recovered_case_ids),
             }
         )
         write_json(run_dir / "validation.json", validation)
@@ -646,6 +665,7 @@ def run_experiment(
                 "fallback_predictions": len(fallback_case_ids),
                 "planner_fallbacks": len(planner_fallback_case_ids),
                 "degraded_cases": len(degraded_case_ids),
+                "recovered_retrieval_cases": len(retrieval_recovered_case_ids),
             }
         )
         write_json(
@@ -757,6 +777,18 @@ def _api_stats(
                     case_status.get(case.case_id, {}).get(
                         "retrieval_failure_codes",
                         client.per_case_failure_codes.get(case.case_id, [])
+                        if client
+                        else [],
+                    )
+                )
+            ),
+            "retrieval_recovered_failure_codes": (
+                list(
+                    case_status.get(case.case_id, {}).get(
+                        "retrieval_recovered_failure_codes",
+                        client.per_case_recovered_failure_codes.get(
+                            case.case_id, []
+                        )
                         if client
                         else [],
                     )

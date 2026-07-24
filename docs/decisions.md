@@ -207,3 +207,9 @@ finish all cases and create a format-valid submission with degraded counts for
 manual review. Token/authentication, model-load, cache-integrity, and external
 backup failures remain fail-fast because continuing would be unsafe or
 systemically invalid.
+
+A transient timeout, `429`, or `5xx` is not a degraded case when the bounded
+retry for the same logical query succeeds. It is recorded separately as a
+recovered retrieval error. Only an unresolved query failure, planner fallback,
+or prediction fallback contributes to `degraded_cases` and can fail the smoke
+gate.

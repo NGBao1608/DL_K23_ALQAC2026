@@ -319,17 +319,30 @@ def _validate_stage_result(
 ) -> None:
     manifest = _read_json(stage_dir / "manifest.json")
     validation = _read_json(stage_dir / "validation.json")
-    if (
-        manifest.get("run", {}).get("status") != "completed"
-        or manifest.get("run", {}).get("completed") != expected_cases
-        or validation.get("status") != "PASS"
-        or validation.get("cases") != expected_cases
-        or (
-            not allow_degraded
-            and manifest.get("run", {}).get("degraded_cases", 0) != 0
+    run = manifest.get("run", {})
+    failures = []
+    if run.get("status") != "completed":
+        failures.append(f"run.status={run.get('status')!r}")
+    if run.get("completed") != expected_cases:
+        failures.append(
+            f"run.completed={run.get('completed')!r}, expected={expected_cases}"
         )
-    ):
-        raise ValueError(f"Stage did not complete and validate: {stage_dir}")
+    if validation.get("status") != "PASS":
+        failures.append(f"validation.status={validation.get('status')!r}")
+    if validation.get("cases") != expected_cases:
+        failures.append(
+            f"validation.cases={validation.get('cases')!r}, expected={expected_cases}"
+        )
+    if not allow_degraded and run.get("degraded_cases", 0) != 0:
+        failures.append(
+            f"run.degraded_cases={run.get('degraded_cases')!r}; "
+            "inspect case_status.json"
+        )
+    if failures:
+        raise ValueError(
+            f"Stage did not complete and validate: {stage_dir} "
+            f"({'; '.join(failures)})"
+        )
     if manifest.get("git_commit") != source_pin.get("commit"):
         raise ValueError("Stage Git commit does not match source pin")
 

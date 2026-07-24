@@ -553,6 +553,8 @@ def test_retry_and_semantic_queries_share_one_per_case_budget(tmp_path):
     assert cache.run_attempt_stats("run")["per_case"]["case_1"][
         "network_attempts"
     ] == 3
+    assert client.per_case_failure_codes["case_1"] == []
+    assert client.per_case_recovered_failure_codes["case_1"] == ["server_error"]
     cache.close()
 
 
@@ -591,6 +593,7 @@ def test_retry_exhaustion_degrades_case_and_resume_uses_partial_cache(tmp_path):
     assert calls == 3
     assert [item.chunk_id for item in evidence] == ["chunk-2"]
     assert first.per_case_failure_codes["case_1"] == ["server_error"]
+    assert first.per_case_recovered_failure_codes["case_1"] == []
 
     resumed_session = FakeSession([])
     resumed = CaseContentClient(

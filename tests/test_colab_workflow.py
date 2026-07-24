@@ -74,7 +74,7 @@ def test_smoke_rejects_degraded_cases_but_full_may_export_them(tmp_path):
     (tmp_path / "validation.json").write_text(
         json.dumps({"status": "PASS", "cases": 2})
     )
-    with pytest.raises(ValueError, match="did not complete"):
+    with pytest.raises(ValueError, match=r"degraded_cases=1.*case_status\.json"):
         _validate_stage_result(
             stage_dir=tmp_path,
             expected_cases=2,
@@ -85,6 +85,38 @@ def test_smoke_rejects_degraded_cases_but_full_may_export_them(tmp_path):
         expected_cases=2,
         source_pin={"commit": "a" * 40},
         allow_degraded=True,
+    )
+
+
+def test_smoke_accepts_recovered_transient_retrieval_error(tmp_path):
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "git_commit": "a" * 40,
+                "run": {
+                    "status": "completed",
+                    "completed": 2,
+                    "degraded_cases": 0,
+                    "recovered_retrieval_cases": 1,
+                },
+            }
+        )
+    )
+    (tmp_path / "validation.json").write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "cases": 2,
+                "degraded_cases": 0,
+                "recovered_retrieval_cases": 1,
+            }
+        )
+    )
+
+    _validate_stage_result(
+        stage_dir=tmp_path,
+        expected_cases=2,
+        source_pin={"commit": "a" * 40},
     )
 
 

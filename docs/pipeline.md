@@ -93,16 +93,21 @@ Live retrieval:
 - enforces a five-second interval;
 - permits at most one case-level retry for timeout, `429`, or `5xx`;
 - does not retry `400`, `401`, `403`, or `422`;
+- records a transient request error as recovered when the query-level retry
+  succeeds, without treating that case as degraded;
 - caches successful responses in SQLite; and
 - de-duplicates results by exact `chunk_id`.
 
 The third network attempt is allocated to a failed primary retry first, or to
 adaptive Q3 when both primary requests succeeded and the evidence gate failed.
-When the global/per-case budget is exhausted, or a case receives a classified
-request failure, retrieval records a safe degradation code and continues with
-cached/partial evidence. Token/authentication, malformed successful-response,
-SQLite integrity, and external-backup failures remain fail-fast because they
-are systemic or safety-critical.
+When the global/per-case budget is exhausted, or a query still has a classified
+request failure after its retry policy is exhausted, retrieval records an
+unresolved degradation code and continues with cached/partial evidence. A
+timeout, `429`, or `5xx` recovered by a successful retry remains visible under
+`retrieval_recovered_failure_codes` and `recovered_retrieval_cases`, but does
+not increment `degraded_cases`. Token/authentication, malformed
+successful-response, SQLite integrity, and external-backup failures remain
+fail-fast because they are systemic or safety-critical.
 
 Important retrieval phrases include “chấp nhận yêu cầu khởi kiện”, “không chấp nhận yêu cầu khởi kiện”, “Hội đồng xét xử nhận định”, and “Tuyên xử”.
 
