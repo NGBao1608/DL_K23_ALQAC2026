@@ -50,14 +50,20 @@ prediction:
   model_name: Qwen/Qwen3-8B
   revision: b968826d9c46dd6066d109eabc6255188de91218
   load_in_4bit: true
-  max_input_tokens: 6144
-  max_new_tokens: 384
+  max_input_tokens: 4096
+  max_new_tokens: 192
+  oom_max_input_tokens: 3072
+  oom_max_new_tokens: 160
+  attn_implementation: sdpa
+  cache_implementation: offloaded
   thinking: false
   adapter_path: null
   allow_case_fallback: true
   max_case_retries: 3
+  max_oom_retries: 1
   fallback_label: B_WIN
-  context_law_top_k: 5
+  context_law_top_k: 3
+  oom_context_law_top_k: 2
   verification_reserve_tokens: 512
   prompt_variant: decision_first_v2
   case_evidence_chars: 2200

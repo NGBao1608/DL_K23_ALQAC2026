@@ -81,7 +81,12 @@ Status: BM25 is `CPU/mock verified`; the hybrid candidate is `implemented`.
 
 ## Outcome stage
 
-The predictor uses pinned `Qwen/Qwen3-8B`, NF4 4-bit, FP16 compute, deterministic generation, and thinking disabled. Token-aware context protects the prompt/query/final instruction under a 6,144-token cap and allocates remaining space to prioritized case evidence and five law articles.
+The predictor uses pinned `Qwen/Qwen3-8B`, NF4 4-bit, FP16 compute,
+deterministic generation, thinking disabled, SDPA attention, and offloaded KV
+cache. The candidate token-aware context protects the prompt/query/final
+instruction under a 4,096-token cap and allocates remaining space to prioritized
+case evidence and three law articles. One CUDA OOM retry reuses the same
+prepared evidence with a 3,072-token/two-law profile.
 
 The model returns structured main claim, accepted scope, acceptance ratio,
 reasoning, and label. Numeric ratios enforce the official boundary; partial or

@@ -135,8 +135,11 @@ The source-pinned private GitHub checkout must contain both immutable files:
 | `private_test_60_cases_extracted_corpus.json` | SHA-256 `9d79379e017ce346cf143a71fa82f5170a755c33a0341048c9baacb28c6119b5`; 14 laws and 2,820 articles |
 
 Both files are permitted only in the verified private repository and may not
-enter source bundles, run artifacts, or exports. Set `PUBLIC_RUN_ID` to the
-successful Public full run so Private reads only the selected scalar from
+enter source bundles, run artifacts, or exports. The current prepared notebook
+sets `PUBLIC_RUN_ID=public-candidate-v7`. Private requires that Public full
+directory to contain `selection_profile.json`, `validation.json`, and
+`manifest.json`, with `validation=PASS` and all 50 cases completed. Private
+reads only the selected scalar from
 `runs/public/<PUBLIC_RUN_ID>/full/selection_profile.json`.
 
 Run:
@@ -191,7 +194,7 @@ The official competition website encourages a short technical report and says or
 | `429` | Wait at least five seconds and use bounded backoff. |
 | `503` | Use bounded exponential retry and resume. |
 | CUDA OOM during retrieval | Reduce reranker batch size and release retrieval models before Qwen. |
-| CUDA OOM during Qwen | Confirm NF4, context budget, and released retrieval models. |
+| CUDA OOM during Qwen | Restart into a clean T4 runtime and resume the same pinned run. Candidate generation uses offloaded KV cache at 4,096/192 tokens; the first OOM retries once with 3,072/160 tokens and two laws, while a second OOM records deterministic fallback. |
 | Invalid model output | Allow one repair attempt; do not invent a fallback label. |
 | Resume identity mismatch | Use the original source/config/input or start a new run directory. |
 | Git clone command contains `[https://...](https://...)` | Use a raw GitHub URL. Current notebooks normalize this accidental Markdown wrapper before clone. |

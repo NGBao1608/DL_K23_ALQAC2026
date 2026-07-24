@@ -12,7 +12,7 @@ Only reproducible artifacts may be recorded as results. Every real API run must 
 | BM25 retrieval | `baseline.yaml` | Local CPU | CPU/mock verified | N/A | N/A | 50 cases: Recall@5 `0.02373`, Recall@10 `0.03756`; artifact `outputs/retrieval_bm25.json`. |
 | Structured Case Retrieval plumbing | shared baseline/candidate retrieval config | Local CPU/mock | CPU/mock verified | N/A | N/A | 50 Public inputs deterministically produced 150 candidate queries; observed length range 8–25 whitespace tokens. Unit tests cover LLM success/fallback classes, grounded validation, evidence gate, adaptive query 3, retry/case caps, resume, cache-only, safe logs, and artifact exclusion. No scored API call was made. |
 | Citation-aware hybrid candidate | `candidate.yaml` | Kaggle T4 | implemented | Not measured | Not measured | Exact citations expand the reranker pool; requires a new two-case smoke run. |
-| Decision-first Qwen3 candidate | `candidate.yaml` | Kaggle T4 | implemented | Not measured | N/A | Uses the official partial-label boundary. Bounded prepared-context re-prediction is `CPU/mock verified`: three retries after the initial attempt, no repeated retrieval, and deterministic fallback only after exhaustion. No clean `GPU/API verified` artifact is recorded. |
+| Decision-first Qwen3 candidate | `candidate.yaml` | Kaggle/Colab T4 target | implemented | Not measured | N/A | Uses the official partial-label boundary. Non-OOM failures retain bounded prepared-context re-prediction. The memory-safe candidate keeps Qwen3-8B with SDPA/offloaded KV cache and 4,096/192 token limits; one OOM retry compacts to 3,072/160 and two laws before fallback. This policy is `CPU/mock verified`; no clean `GPU/API verified` artifact is recorded. |
 | Split Drive-first Colab candidate path | `candidate.yaml` | Local tests only | CPU/mock verified | Not measured | Not measured | Public/Private smoke-full orchestration, source pinning, automatic model gate, Private corpus validation, token budgeting, resume-safe pending SQLite backup, submission-hash binding, notebook syntax, and safe export are covered; no live T4 result is claimed. |
 | Candidate smoke artifact `334997098` | `candidate.yaml` | Kaggle T4 | implemented | N/A | N/A | Commit `495f178eafe5232ded1be4487f94c5360836be5c`; two Case API attempts returned HTTP 200 and produced two cache rows, then execution stopped during `AITeamVN/Vietnamese_Embedding` download before context preparation or prediction completed. |
 | Public candidate diagnostic `public-candidate-v4` | `candidate.yaml` | Colab T4 + live API | implemented | Not measured | Not measured | Commit `ec1675edaebc57998105db64f8a62724c6dbe324`; smoke completed, but full stopped before prediction. Query plans used the LLM for 2/50 cases and deterministic fallback for 48/50, all recorded as `ValueError`. Full recorded 22 attempts, 20 successful calls, 6 cache hits, and nine prepared contexts; `case_8219` consumed 3 attempts with one success before an inline retry raised `ApiBudgetExceeded`. Diagnostic only; not `GPU/API verified` and not submit-ready. |
@@ -40,6 +40,13 @@ The `public-candidate-v6` artifact showed the same distinction for structured
 planning. The deterministic planner is the required recovery path for an LLM
 planner timeout, so it remains observable under `planner_fallbacks` without
 degrading an otherwise complete case.
+
+A user-provided `public-candidate-v7` progress excerpt showed Qwen3-8B outcome
+generation raising `OutOfMemoryError` four times for the same prepared case
+before deterministic fallback. The complete v7 artifact has not been inspected
+in this repository, so no v7 accuracy, Law F1, or verification status is
+recorded here. The excerpt motivated D-018; its replacement remains
+`CPU/mock verified` until Private smoke runs on a clean T4.
 
 ## Official format revision
 

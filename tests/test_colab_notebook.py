@@ -91,7 +91,11 @@ def test_private_notebook_uses_private_inputs_without_evaluator():
     assert text.index("['git', 'clone'") < text.index(
         "for required in (PRIVATE_INPUT, PRIVATE_CORPUS)"
     )
-    assert "full/selection_profile.json" in text
+    assert "PUBLIC_FULL / 'selection_profile.json'" in text
+    assert "PUBLIC_FULL / 'validation.json'" in text
+    assert "PUBLIC_FULL / 'manifest.json'" in text
+    assert "PUBLIC_RUN_ID = 'public-candidate-v7'" in text
+    assert "PYTORCH_CUDA_ALLOC_CONF" in text
     assert "ALQAC_TEAM_TOKEN" in text
     assert "metrics.json" not in text
     assert "errors.json" not in text

@@ -76,8 +76,14 @@ Read only the relevant canonical documents:
 - Outcome prediction retries a failed case at most three times after the
   initial attempt. Every attempt must reuse the same checkpointed
   `PreparedCase`; it must not repeat query planning, Case API retrieval, or law
-  retrieval. Deterministic outcome fallback is allowed only after all four
-  model attempts fail. Record only safe attempt counts and exception types.
+  retrieval. Non-OOM failures may use all four model attempts. CUDA OOM receives
+  one compact retry with a smaller context and offloaded KV cache; a second OOM
+  uses deterministic outcome fallback immediately. Record only safe attempt
+  counts and exception types.
+- The candidate outcome profile retains pinned NF4 4-bit `Qwen/Qwen3-8B` while
+  limiting normal generation to 4,096 input tokens, 192 output tokens, and
+  three law articles. It uses SDPA and offloaded KV cache. OOM recovery reuses
+  the same prepared evidence with a 3,072-token/two-law profile.
 - The official submission limits conflict: the competition website says three submissions per day, while the leaderboard rules say 20 per team per 24 hours. Treat this as `Needs confirmation` and enforce the stricter team limit of at most three submissions in any 24-hour period.
 - Private Test permits at most three distinctly named runs in total; run names cannot be reused and the best run counts.
 

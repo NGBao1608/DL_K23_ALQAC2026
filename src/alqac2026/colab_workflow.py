@@ -97,10 +97,7 @@ def run_private_stage(
         / "full"
         / "selection_profile.json"
     )
-    if not selection_profile.is_file():
-        raise FileNotFoundError(
-            f"Missing Public selection profile: {selection_profile}"
-        )
+    _validate_public_selection_run(selection_profile)
     return _run_stage(
         track="private",
         stage=stage,
@@ -373,6 +370,38 @@ def _validate_private_corpus(path: Path) -> None:
     if len(law_ids) != 14 or len(articles) != 2820:
         raise ValueError(
             "Private law corpus must contain the reviewed 14 laws and 2,820 articles"
+        )
+
+
+def _validate_public_selection_run(selection_profile: Path) -> None:
+    """Require a completed validated Public full run before Private inference."""
+    full_dir = selection_profile.parent
+    required = {
+        "selection profile": selection_profile,
+        "validation": full_dir / "validation.json",
+        "manifest": full_dir / "manifest.json",
+    }
+    missing = [label for label, path in required.items() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing Public full-run artifacts ({', '.join(missing)}): {full_dir}"
+        )
+    validation = _read_json(required["validation"])
+    manifest = _read_json(required["manifest"])
+    run = manifest.get("run", {}) if isinstance(manifest, dict) else {}
+    failures = []
+    if validation.get("status") != "PASS":
+        failures.append(f"validation.status={validation.get('status')!r}")
+    if validation.get("cases") != TRACK_CASES["public"]:
+        failures.append(f"validation.cases={validation.get('cases')!r}")
+    if run.get("status") != "completed":
+        failures.append(f"manifest.run.status={run.get('status')!r}")
+    if run.get("completed") != TRACK_CASES["public"]:
+        failures.append(f"manifest.run.completed={run.get('completed')!r}")
+    if failures:
+        raise ValueError(
+            "Public selection profile must come from a completed validated "
+            f"50-case full run: {full_dir} ({'; '.join(failures)})"
         )
 
 

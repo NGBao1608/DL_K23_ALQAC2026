@@ -227,7 +227,28 @@ retrieval. CUDA cache is cleared between failed attempts. One attempt may still
 contain the existing single JSON repair or partial-label verifier generation.
 
 If a later attempt succeeds, the case is completed without degradation and the
-safe attempt/failure-type metadata remains internal. If all four attempts fail,
-the deterministic outcome fallback produces a complete flagged result.
-Model-load failure before the case loop remains fail-fast. The retry bound is
-shared by smoke and full through the same resolved configuration.
+safe attempt/failure-type metadata remains internal. Non-OOM errors may consume
+all four attempts. CUDA OOM follows D-018's stricter one-compact-retry policy.
+When the applicable retry bound is exhausted, deterministic outcome fallback
+produces a complete flagged result. Model-load failure before the case loop
+remains fail-fast. The retry policy is shared by smoke and full through the same
+resolved configuration.
+
+## D-018: Memory-safe Private Qwen3-8B profile
+
+**Status:** Accepted and `CPU/mock verified`
+
+Private outcome inference retains the pinned NF4 4-bit Qwen3-8B rather than
+switching to an unmeasured 4B model. The candidate uses SDPA, offloaded KV
+cache, a 4,096-token input cap, a 192-token output cap, and three law articles
+in the outcome prompt. This changes only model context; retrieval still
+checkpoints ten laws and submission top-k still comes from the validated Public
+selection profile.
+
+The first CUDA OOM activates a 3,072-token, 160-output-token, two-law profile
+against the exact same `PreparedCase`. A second OOM falls back immediately.
+Repeating the original allocation two additional times was rejected because a
+`public-candidate-v7` progress excerpt showed deterministic OOM repetition on
+Colab T4. This observation is diagnostic only until the complete run artifact
+is reviewed. A clean Private smoke on the pinned commit/config remains
+mandatory before full.

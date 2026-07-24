@@ -20,7 +20,7 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 | Add cache-only Public mode | Evaluate model/law pipeline without adding permanent organizer calls | Runner, cache client, Public notebook | 50-case capable path with cache misses converted to empty evidence and zero HTTP | CPU/mock verified |
 | Validate and index the Private law corpus | Bind Private law evidence and index reuse to the organizer-provided corpus | Colab helper, Private notebook, private Git checkout | Reviewed hash, 14 laws, 2,820 articles, fingerprinted index | CPU/mock verified |
 | Verify refreshed API with two cases | Confirm auth, rate limit, response schema, opaque IDs, cache, and resume | Public notebook, Case API client | Two-case artifact with safe API stats and no repeated successful calls | Not implemented yet |
-| Verify Qwen candidate on Colab T4 | Produce a real two-case outcome artifact after the model-only gate | `candidate.yaml`, Colab notebook | Completed two-case run, valid JSON outputs, no OOM | Not implemented yet |
+| Verify memory-safe Qwen candidate on Colab T4 | Produce a real two-case Private outcome artifact after the model-only gate | `candidate.yaml`, Private Colab notebook | Completed two-case run, valid JSON outputs, no OOM, same commit/config ready for full | Not implemented yet |
 | Complete Public baseline | Create a comparable 50-case BM25 + Qwen run | Public runner | Reproducible full Public run and validated candidate submission | Not implemented yet |
 | Complete Public candidate | Evaluate hybrid law retrieval and reranking | `candidate.yaml`, public runner | Reproducible full Public candidate run | Not implemented yet |
 | Validate refreshed submission | Prevent format rejection | Submission builder/validator | `validation.json` PASS under opaque-ID rules | CPU/mock verified |
@@ -45,6 +45,7 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 | Task name | Purpose | Related files/modules | Expected output | Current status |
 |---|---|---|---|---|
 | Clean-kernel replay | Prove setup is reproducible | Colab notebook, Colab requirements | Restart & Run All succeeds on a fresh T4 runtime | Not implemented yet |
+| Run Private candidate | Use `public-candidate-v7` law-top-k profile and the memory-safe Qwen3-8B candidate | Private Colab notebook, Drive artifacts | 2-case smoke PASS, then 60 completed validated cases under the same Private `RUN_ID` | Not implemented yet |
 | Pin final environment | Freeze dependencies and model revisions | Requirements/config/manifest | Reproducible environment record | implemented |
 | Maintain experiment registry | Prevent unsupported score claims | `docs/experiments.md`, run manifests | Every result references config, Git revision, artifacts, and API count | implemented |
 | Prepare source bundle | Deliver clean source without secrets/data/cache | Packaging script | Audited source archive | CPU/mock verified |

@@ -290,12 +290,32 @@ class TransformersQwenBackend:
         load_in_4bit: bool = True,
         max_input_tokens: int = 7000,
         max_new_tokens: int = 384,
+        oom_max_input_tokens: int | None = None,
+        oom_max_new_tokens: int | None = None,
+        attn_implementation: str | None = None,
+        cache_implementation: str | None = None,
         thinking: bool = False,
         adapter_path: str | None = None,
     ):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+        if max_input_tokens <= 0 or max_new_tokens <= 0:
+            raise ValueError("Generation token limits must be positive")
+        if oom_max_input_tokens is not None and not (
+            0 < oom_max_input_tokens <= max_input_tokens
+        ):
+            raise ValueError(
+                "oom_max_input_tokens must be positive and no greater than "
+                "max_input_tokens"
+            )
+        if oom_max_new_tokens is not None and not (
+            0 < oom_max_new_tokens <= max_new_tokens
+        ):
+            raise ValueError(
+                "oom_max_new_tokens must be positive and no greater than "
+                "max_new_tokens"
+            )
         quantization_config = None
         if load_in_4bit:
             quantization_config = BitsAndBytesConfig(
@@ -305,13 +325,17 @@ class TransformersQwenBackend:
                 bnb_4bit_use_double_quant=True,
             )
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision)
+        model_kwargs = {
+            "device_map": "auto",
+            "torch_dtype": torch.float16,
+            "quantization_config": quantization_config,
+            "trust_remote_code": True,
+            "revision": revision,
+        }
+        if attn_implementation:
+            model_kwargs["attn_implementation"] = attn_implementation
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            quantization_config=quantization_config,
-            trust_remote_code=True,
-            revision=revision,
+            model_name, **model_kwargs
         ).eval()
         if adapter_path:
             from peft import PeftModel
@@ -319,6 +343,9 @@ class TransformersQwenBackend:
             self.model = PeftModel.from_pretrained(self.model, adapter_path).eval()
         self.max_input_tokens = max_input_tokens
         self.max_new_tokens = max_new_tokens
+        self.oom_max_input_tokens = oom_max_input_tokens
+        self.oom_max_new_tokens = oom_max_new_tokens
+        self.cache_implementation = cache_implementation
         self.thinking = thinking
 
     def _render_prompt(self, system_prompt: str, user_prompt: str) -> str:
@@ -353,14 +380,41 @@ class TransformersQwenBackend:
                 f"{self.max_input_tokens}"
             )
         with torch.inference_mode():
+            generation_kwargs = {
+                "do_sample": False,
+                "max_new_tokens": self.max_new_tokens,
+                "pad_token_id": self.tokenizer.eos_token_id,
+            }
+            if self.cache_implementation and torch.cuda.is_available():
+                generation_kwargs["cache_implementation"] = (
+                    self.cache_implementation
+                )
             output = self.model.generate(
                 **inputs,
-                do_sample=False,
-                max_new_tokens=self.max_new_tokens,
-                pad_token_id=self.tokenizer.eos_token_id,
+                **generation_kwargs,
             )
         generated = output[0, inputs["input_ids"].shape[1] :]
         return self.tokenizer.decode(generated, skip_special_tokens=True)
+
+    def activate_oom_recovery(self) -> bool:
+        """Switch subsequent generations to the configured compact profile."""
+        changed = False
+        if (
+            self.oom_max_input_tokens is not None
+            and self.max_input_tokens != self.oom_max_input_tokens
+        ):
+            self.max_input_tokens = self.oom_max_input_tokens
+            changed = True
+        if (
+            self.oom_max_new_tokens is not None
+            and self.max_new_tokens != self.oom_max_new_tokens
+        ):
+            self.max_new_tokens = self.oom_max_new_tokens
+            changed = True
+        if self.cache_implementation != "offloaded":
+            self.cache_implementation = "offloaded"
+            changed = True
+        return changed
 
     def release(self) -> None:
         self.model = None
@@ -385,9 +439,27 @@ class OutcomePredictor:
         max_input_tokens: int = 6144,
         context_law_top_k: int = 5,
         verification_reserve_tokens: int = 512,
+        oom_max_input_tokens: int | None = None,
+        oom_context_law_top_k: int | None = None,
     ):
         if case_evidence_chars <= 0 or law_evidence_chars <= 0:
             raise ValueError("Evidence character budgets must be positive")
+        if max_input_tokens <= 0 or context_law_top_k <= 0:
+            raise ValueError("Prediction context limits must be positive")
+        if oom_max_input_tokens is not None and not (
+            0 < oom_max_input_tokens <= max_input_tokens
+        ):
+            raise ValueError(
+                "oom_max_input_tokens must be positive and no greater than "
+                "max_input_tokens"
+            )
+        if oom_context_law_top_k is not None and not (
+            0 < oom_context_law_top_k <= context_law_top_k
+        ):
+            raise ValueError(
+                "oom_context_law_top_k must be positive and no greater than "
+                "context_law_top_k"
+            )
         self.backend = backend
         self.system_prompt = system_prompt
         self.case_evidence_chars = case_evidence_chars
@@ -395,6 +467,28 @@ class OutcomePredictor:
         self.max_input_tokens = max_input_tokens
         self.context_law_top_k = context_law_top_k
         self.verification_reserve_tokens = verification_reserve_tokens
+        self.oom_max_input_tokens = oom_max_input_tokens
+        self.oom_context_law_top_k = oom_context_law_top_k
+
+    def activate_oom_recovery(self) -> bool:
+        """Use a smaller prompt while retaining the exact prepared evidence."""
+        changed = False
+        if (
+            self.oom_max_input_tokens is not None
+            and self.max_input_tokens != self.oom_max_input_tokens
+        ):
+            self.max_input_tokens = self.oom_max_input_tokens
+            changed = True
+        if (
+            self.oom_context_law_top_k is not None
+            and self.context_law_top_k != self.oom_context_law_top_k
+        ):
+            self.context_law_top_k = self.oom_context_law_top_k
+            changed = True
+        activate_backend = getattr(self.backend, "activate_oom_recovery", None)
+        if callable(activate_backend):
+            changed = bool(activate_backend()) or changed
+        return changed
 
     def _build_prompt(
         self,
@@ -523,6 +617,18 @@ def create_predictor(config: dict) -> OutcomePredictor:
         load_in_4bit=bool(config.get("load_in_4bit", True)),
         max_input_tokens=int(config.get("max_input_tokens", 7000)),
         max_new_tokens=int(config.get("max_new_tokens", 384)),
+        oom_max_input_tokens=(
+            int(config["oom_max_input_tokens"])
+            if config.get("oom_max_input_tokens") is not None
+            else None
+        ),
+        oom_max_new_tokens=(
+            int(config["oom_max_new_tokens"])
+            if config.get("oom_max_new_tokens") is not None
+            else None
+        ),
+        attn_implementation=config.get("attn_implementation"),
+        cache_implementation=config.get("cache_implementation"),
         thinking=bool(config.get("thinking", False)),
         adapter_path=config.get("adapter_path"),
     )
@@ -538,5 +644,15 @@ def create_predictor(config: dict) -> OutcomePredictor:
         context_law_top_k=int(config.get("context_law_top_k", 5)),
         verification_reserve_tokens=int(
             config.get("verification_reserve_tokens", 512)
+        ),
+        oom_max_input_tokens=(
+            int(config["oom_max_input_tokens"])
+            if config.get("oom_max_input_tokens") is not None
+            else None
+        ),
+        oom_context_law_top_k=(
+            int(config["oom_context_law_top_k"])
+            if config.get("oom_context_law_top_k") is not None
+            else None
         ),
     )

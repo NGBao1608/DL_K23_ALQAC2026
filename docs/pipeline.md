@@ -166,7 +166,12 @@ Exact citations ─────────────────────�
 
 The candidate uses `AITeamVN/Vietnamese_Embedding`, normalized dot product, Reciprocal Rank Fusion, and `AITeamVN/Vietnamese_Reranker`. A controlled law query uses the case query, dispute phrase, claim/decision sentences, and exact citations instead of arbitrary evidence prefixes. Up to 12 exact `Điều ...` citations expand the reranker pool without bypassing reranking. The index metadata binds corpus content, preprocessing schema, model revision, article keys, and embedding dimension.
 
-Prepared contexts retain the top 10 laws. Qwen sees the first five. Public evaluation selects submission top-k from 3 through 10 by Micro Law F1, ties toward the smaller k, and writes a profile that Private consumes as a scalar only.
+Prepared contexts retain the top 10 laws. The memory-safe candidate outcome
+prompt sees the first three, while its OOM recovery prompt sees the first two;
+this does not truncate the law evidence retained for evaluation or submission.
+Public evaluation selects submission top-k from 3 through 10 by Micro Law F1,
+ties toward the smaller k, and writes a profile that Private consumes as a
+scalar only.
 
 Status:
 
@@ -175,11 +180,18 @@ Status:
 
 ## 4. Outcome prediction
 
-The current predictor uses pinned `Qwen/Qwen3-8B` with NF4 4-bit quantization, FP16 compute, double quantization, deterministic generation, and thinking disabled.
+The current predictor uses pinned `Qwen/Qwen3-8B` with NF4 4-bit quantization,
+FP16 compute, double quantization, deterministic generation, thinking disabled,
+SDPA attention, and an offloaded KV cache for the candidate T4 profile.
 
 The candidate uses the `decision_first_v2` prompt. It identifies the plaintiff's main claim, prioritizes `Tuyên xử`/`Quyết định` evidence, separates procedural or independent claims, and estimates the accepted proportion before selecting a label. Its `>50%` boundary for `PARTIAL_A_WIN` versus `PARTIAL_B_WIN` now matches the official competition definition.
 
-Input context is tokenizer-aware with a 6,144-token input cap and a 384-token output cap. System instructions, `case_query`, and the final JSON instruction are protected; remaining context is allocated approximately 65% to prioritized case evidence and 35% to the first five laws, with unused space reallocated.
+Candidate input context is tokenizer-aware with a 4,096-token input cap and a
+192-token output cap. System instructions, `case_query`, and the final JSON
+instruction are protected; remaining context is allocated approximately 65% to
+prioritized case evidence and 35% to the first three laws, with unused space
+reallocated. Retrieval still checkpoints ten law results, so this prompt-only
+limit does not change submission evidence.
 
 The model must emit:
 
@@ -199,12 +211,16 @@ inconsistent results receive one deterministic verifier pass; a malformed
 first output receives one repair. These operations belong to one case-level
 prediction attempt.
 
-If that attempt still raises an exception, the prediction stage clears the CUDA
-cache and repeats the complete prediction against the exact same checkpointed
-`PreparedCase`. `max_case_retries: 3` permits three retries after the initial
-attempt, for at most four model attempts per case. Re-prediction never repeats
-query planning, Case API calls, or law retrieval. Only after all attempts fail
-does the pipeline use the explicitly configured deterministic fallback.
+If that attempt still raises an exception, the prediction stage performs
+garbage collection, clears the CUDA cache, and repeats prediction against the
+exact same checkpointed `PreparedCase`. Non-OOM failures may use
+`max_case_retries: 3`, for at most four model attempts per case. CUDA OOM is
+handled differently: the first OOM activates a 3,072-token, 160-output-token,
+two-law compact profile and permits one retry; a second OOM falls back
+immediately. Both normal and compact candidate generation use offloaded KV
+cache. Re-prediction never repeats query planning, Case API calls, or law
+retrieval. Only after the applicable bounded policy is exhausted does the
+pipeline use the explicitly configured deterministic fallback.
 Operative court language maps clear full acceptance/rejection first;
 unquantified partial acceptance maps conservatively to `PARTIAL_B_WIN`; the
 configured default is `B_WIN` when no trustworthy operative scope exists.
@@ -238,8 +254,9 @@ records `degraded_cases`, `planner_fallbacks`, and `fallback_predictions` in its
 manifest and validation artifacts, together with retry/recovery counts, so a
 complete submission can be reviewed before manual upload.
 
-Status: fallback completion is `CPU/mock verified`; the model path is not yet
-supported by a clean recorded `GPU/API verified` run.
+Status: fallback completion and the memory-safe/OOM-compact policy are
+`CPU/mock verified`; the model path is not yet supported by a clean recorded
+`GPU/API verified` run.
 
 The pinned Qwen3-8B, Vietnamese Embedding, and Vietnamese Reranker revisions are public, ungated, Apache-2.0, and each below the official 10-billion-parameter limit according to their Hugging Face metadata checked on 2026-07-20. The production pipeline loads these weights locally, does not call a proprietary model API, and must not use externally annotated legal QA or legal entailment datasets.
 
@@ -301,6 +318,11 @@ storage while skipping duplicate Hugging Face blobs. It checkpoints runs under
 track-specific Drive directories and exports only allowlisted validated files
 plus SHA-256 checksums. Private input and law corpus come from the source-pinned
 private repository checkout.
+
+Before Private starts, the source Public full directory must contain
+`selection_profile.json`, `validation.json`, and `manifest.json`; validation
+must be `PASS` and the manifest must record all 50 Public cases completed.
+Private consumes only the selected law top-k scalar from that profile.
 
 Notebook logic remains thin; reusable behavior belongs in `src/alqac2026`.
 

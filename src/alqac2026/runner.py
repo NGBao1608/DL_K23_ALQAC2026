@@ -523,6 +523,9 @@ def run_experiment(
                 max_prediction_retries=int(
                     config["prediction"].get("max_case_retries", 0)
                 ),
+                max_oom_retries=int(
+                    config["prediction"].get("max_oom_retries", 1)
+                ),
                 prediction_retry_callback=emit_prediction_retry,
             )
             for case in pending_cases:

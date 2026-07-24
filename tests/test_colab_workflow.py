@@ -8,6 +8,7 @@ import pytest
 import alqac2026.colab_workflow as colab_workflow
 from alqac2026.colab_workflow import (
     _require_smoke_gate,
+    _validate_public_selection_run,
     _validate_stage_result,
     _verify_existing_export,
     _validate_private_corpus,
@@ -166,6 +167,51 @@ def test_private_corpus_matches_reviewed_contract(tmp_path, monkeypatch):
     monkeypatch.setattr(colab_workflow, "load_law_corpus", lambda _: articles)
 
     _validate_private_corpus(corpus_path)
+
+
+def test_private_requires_completed_validated_public_full_run(tmp_path):
+    full_dir = tmp_path / "runs/public/public-candidate-v7/full"
+    full_dir.mkdir(parents=True)
+    profile = full_dir / "selection_profile.json"
+    profile.write_text(json.dumps({"submission_law_top_k": 5}))
+    (full_dir / "validation.json").write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "cases": 50,
+                "degraded_cases": 7,
+            }
+        )
+    )
+    (full_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "run": {
+                    "status": "completed",
+                    "completed": 50,
+                    "degraded_cases": 7,
+                }
+            }
+        )
+    )
+
+    _validate_public_selection_run(profile)
+
+
+def test_private_rejects_incomplete_public_selection_run(tmp_path):
+    full_dir = tmp_path / "runs/public/public-candidate-v7/full"
+    full_dir.mkdir(parents=True)
+    profile = full_dir / "selection_profile.json"
+    profile.write_text(json.dumps({"submission_law_top_k": 5}))
+    (full_dir / "validation.json").write_text(
+        json.dumps({"status": "PASS", "cases": 50})
+    )
+    (full_dir / "manifest.json").write_text(
+        json.dumps({"run": {"status": "running", "completed": 49}})
+    )
+
+    with pytest.raises(ValueError, match="completed validated 50-case"):
+        _validate_public_selection_run(profile)
 
 
 def test_workflow_config_cannot_drift_for_existing_run_id(tmp_path):

@@ -211,10 +211,98 @@ def test_create_predictor_forwards_optional_adapter_without_loading_models(
             "model_name": "Qwen/Qwen3-8B",
             "adapter_path": "/drive/adapter",
             "prompt_variant": "decision_first_v2",
+            "max_input_tokens": 4096,
+            "max_new_tokens": 192,
+            "oom_max_input_tokens": 3072,
+            "oom_max_new_tokens": 160,
+            "attn_implementation": "sdpa",
+            "cache_implementation": "offloaded",
+            "context_law_top_k": 3,
+            "oom_context_law_top_k": 2,
         }
     )
     assert captured["adapter_path"] == "/drive/adapter"
+    assert captured["max_input_tokens"] == 4096
+    assert captured["max_new_tokens"] == 192
+    assert captured["oom_max_input_tokens"] == 3072
+    assert captured["oom_max_new_tokens"] == 160
+    assert captured["attn_implementation"] == "sdpa"
+    assert captured["cache_implementation"] == "offloaded"
     assert predictor.system_prompt == DECISION_FIRST_SYSTEM_PROMPT
+    assert predictor.context_law_top_k == 3
+    assert predictor.oom_context_law_top_k == 2
+
+
+def test_predictor_activates_compact_oom_profile():
+    class ProfileBackend:
+        def __init__(self):
+            self.activated = 0
+
+        def generate(self, system_prompt, user_prompt):
+            raise AssertionError("not used")
+
+        def activate_oom_recovery(self):
+            self.activated += 1
+            return True
+
+    backend = ProfileBackend()
+    predictor = OutcomePredictor(
+        backend,
+        max_input_tokens=4096,
+        context_law_top_k=3,
+        oom_max_input_tokens=3072,
+        oom_context_law_top_k=2,
+    )
+
+    assert predictor.activate_oom_recovery()
+    assert predictor.max_input_tokens == 3072
+    assert predictor.context_law_top_k == 2
+    assert backend.activated == 1
+
+
+def test_transformers_backend_uses_offloaded_cache_for_cuda_generation(
+    monkeypatch,
+):
+    import torch
+
+    captured = {}
+
+    class Batch(dict):
+        def to(self, device):
+            return self
+
+    class Tokenizer:
+        eos_token_id = 9
+
+        def apply_chat_template(self, *args, **kwargs):
+            return "prompt"
+
+        def __call__(self, *args, **kwargs):
+            return Batch(input_ids=torch.tensor([[1, 2]]))
+
+        def decode(self, tokens, skip_special_tokens=True):
+            return "decoded"
+
+    class Model:
+        device = "cpu"
+
+        def generate(self, **kwargs):
+            captured.update(kwargs)
+            return torch.tensor([[1, 2, 3]])
+
+    backend = object.__new__(prediction_module.TransformersQwenBackend)
+    backend.tokenizer = Tokenizer()
+    backend.model = Model()
+    backend.max_input_tokens = 4096
+    backend.max_new_tokens = 192
+    backend.cache_implementation = "offloaded"
+    backend.thinking = False
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    assert backend.generate("system", "user") == "decoded"
+    assert captured["cache_implementation"] == "offloaded"
+    assert captured["max_new_tokens"] == 192
+    assert captured["do_sample"] is False
 
 
 def test_case_prediction_failure_uses_submission_safe_operative_fallback():
@@ -360,6 +448,107 @@ def test_case_prediction_uses_fallback_only_after_all_retries_are_exhausted():
     assert result.prediction_failure_types == ["ValueError"] * 4
 
 
+def test_cuda_oom_gets_one_compact_retry_with_same_prepared_context():
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    class RecoveringPredictor:
+        def __init__(self):
+            self.calls = 0
+            self.activated = 0
+            self.inputs = []
+
+        def predict(self, case, case_evidence, law_evidence):
+            self.calls += 1
+            self.inputs.append((case, case_evidence, law_evidence))
+            if self.calls == 1:
+                raise OutOfMemoryError("CUDA out of memory")
+            return OutcomeLabel.A_WIN, "Recovered compactly.", "{}"
+
+        def activate_oom_recovery(self):
+            self.activated += 1
+            return True
+
+    prepared = PreparedCase(
+        case=InferenceCase("case_1", "Nguyên đơn yêu cầu trả nợ."),
+        case_evidence=[],
+        law_evidence=[],
+        api_calls=3,
+    )
+    predictor = RecoveringPredictor()
+    retry_events = []
+    pipeline = ALQACPipeline(
+        None,
+        None,
+        predictor,
+        allow_prediction_fallback=True,
+        max_prediction_retries=3,
+        max_oom_retries=1,
+        prediction_retry_callback=retry_events.append,
+    )
+
+    result = pipeline.predict_prepared(prepared)
+
+    assert result.status == "completed"
+    assert result.prediction is OutcomeLabel.A_WIN
+    assert result.prediction_attempts == 2
+    assert result.prediction_failure_types == ["OutOfMemoryError"]
+    assert predictor.calls == 2
+    assert predictor.activated == 1
+    assert retry_events[0]["error_type"] == "OutOfMemoryError"
+    assert all(
+        case is prepared.case
+        and case_evidence is prepared.case_evidence
+        and law_evidence is prepared.law_evidence
+        for case, case_evidence, law_evidence in predictor.inputs
+    )
+
+
+def test_second_cuda_oom_falls_back_without_two_more_identical_retries():
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    class FailingPredictor:
+        def __init__(self):
+            self.calls = 0
+            self.activated = 0
+
+        def predict(self, case, case_evidence, law_evidence):
+            self.calls += 1
+            raise OutOfMemoryError("CUDA out of memory")
+
+        def activate_oom_recovery(self):
+            self.activated += 1
+            return True
+
+    predictor = FailingPredictor()
+    pipeline = ALQACPipeline(
+        None,
+        None,
+        predictor,
+        allow_prediction_fallback=True,
+        max_prediction_retries=3,
+        max_oom_retries=1,
+    )
+
+    result = pipeline.predict_prepared(
+        PreparedCase(
+            case=InferenceCase("case_1", "Nguyên đơn yêu cầu trả nợ."),
+            case_evidence=[],
+            law_evidence=[],
+            api_calls=0,
+        )
+    )
+
+    assert predictor.calls == 2
+    assert predictor.activated == 1
+    assert result.status == "completed"
+    assert result.prediction is OutcomeLabel.B_WIN
+    assert result.error == "PredictionFallback:OutOfMemoryError"
+    assert result.prediction_attempts == 2
+    assert result.prediction_failure_types == ["OutOfMemoryError"] * 2
+
+
 @pytest.mark.parametrize("value", [-1, 4, True, 1.5])
 def test_case_prediction_retry_cap_must_be_zero_to_three(value):
     with pytest.raises(ValueError, match="integer from 0 to 3"):
@@ -368,6 +557,17 @@ def test_case_prediction_retry_cap_must_be_zero_to_three(value):
             None,
             object(),
             max_prediction_retries=value,
+        )
+
+
+@pytest.mark.parametrize("value", [-1, 2, True, 1.5])
+def test_oom_retry_cap_must_be_zero_or_one(value):
+    with pytest.raises(ValueError, match="integer from 0 to 1"):
+        ALQACPipeline(
+            None,
+            None,
+            object(),
+            max_oom_retries=value,
         )
 
 

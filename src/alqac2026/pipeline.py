@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import re
 import time
 from dataclasses import asdict, dataclass
@@ -105,6 +106,7 @@ class ALQACPipeline:
         allow_prediction_fallback: bool = False,
         prediction_fallback_label: OutcomeLabel = OutcomeLabel.B_WIN,
         max_prediction_retries: int = 0,
+        max_oom_retries: int = 1,
         prediction_retry_callback: (
             Callable[[dict[str, object]], None] | None
         ) = None,
@@ -115,12 +117,19 @@ class ALQACPipeline:
             or not 0 <= max_prediction_retries <= 3
         ):
             raise ValueError("max_prediction_retries must be an integer from 0 to 3")
+        if (
+            isinstance(max_oom_retries, bool)
+            or not isinstance(max_oom_retries, int)
+            or not 0 <= max_oom_retries <= 1
+        ):
+            raise ValueError("max_oom_retries must be an integer from 0 to 1")
         self.case_retriever = case_retriever
         self.law_retriever = law_retriever
         self.predictor = predictor
         self.allow_prediction_fallback = allow_prediction_fallback
         self.prediction_fallback_label = prediction_fallback_label
         self.max_prediction_retries = max_prediction_retries
+        self.max_oom_retries = max_oom_retries
         self.prediction_retry_callback = prediction_retry_callback
 
     def prepare_case(self, case: InferenceCase, law_top_k: int = 5) -> PreparedCase:
@@ -133,7 +142,9 @@ class ALQACPipeline:
         started = time.perf_counter()
         failure_types: list[str] = []
         max_attempts = 1 + self.max_prediction_retries
+        oom_failures = 0
         for attempt_index in range(max_attempts):
+            failure: tuple[str, str, bool] | None = None
             try:
                 label, reasoning, raw = self.predictor.predict(
                     prepared.case, prepared.case_evidence, prepared.law_evidence
@@ -151,47 +162,65 @@ class ALQACPipeline:
                     prediction_failure_types=failure_types,
                 )
             except Exception as error:
-                failure_types.append(type(error).__name__)
-                _clear_cuda_cache_after_case_failure()
-                if attempt_index + 1 < max_attempts:
-                    self._emit_prediction_retry(
-                        case_id=prepared.case.case_id,
-                        failed_attempt=attempt_index + 1,
-                        next_attempt=attempt_index + 2,
-                        max_attempts=max_attempts,
-                        error_type=type(error).__name__,
-                    )
-                    continue
-                if not self.allow_prediction_fallback:
-                    return PredictionResult(
-                        case_id=prepared.case.case_id,
-                        prediction=None,
-                        case_evidence=prepared.case_evidence,
-                        law_evidence=prepared.law_evidence,
-                        api_calls=prepared.api_calls,
-                        latency_seconds=time.perf_counter() - started,
-                        status="failed",
-                        error=f"{type(error).__name__}: {error}",
-                        prediction_attempts=attempt_index + 1,
-                        prediction_failure_types=failure_types,
-                    )
-                fallback_label, fallback_reason = _fallback_outcome(
-                    prepared.case_evidence,
-                    default=self.prediction_fallback_label,
+                failure = (
+                    type(error).__name__,
+                    str(error),
+                    _is_cuda_oom(error),
                 )
+            error_type, error_message, is_oom = failure
+            failure_types.append(error_type)
+            if is_oom:
+                oom_failures += 1
+            _clear_cuda_cache_after_case_failure()
+            retries_remain = attempt_index + 1 < max_attempts
+            oom_retry_allowed = (
+                not is_oom or oom_failures <= self.max_oom_retries
+            )
+            if retries_remain and oom_retry_allowed:
+                if is_oom:
+                    activate_recovery = getattr(
+                        self.predictor, "activate_oom_recovery", None
+                    )
+                    if callable(activate_recovery):
+                        activate_recovery()
+                self._emit_prediction_retry(
+                    case_id=prepared.case.case_id,
+                    failed_attempt=attempt_index + 1,
+                    next_attempt=attempt_index + 2,
+                    max_attempts=max_attempts,
+                    error_type=error_type,
+                )
+                continue
+            if not self.allow_prediction_fallback:
                 return PredictionResult(
                     case_id=prepared.case.case_id,
-                    prediction=fallback_label,
+                    prediction=None,
                     case_evidence=prepared.case_evidence,
                     law_evidence=prepared.law_evidence,
-                    reasoning=fallback_reason,
                     api_calls=prepared.api_calls,
                     latency_seconds=time.perf_counter() - started,
-                    status="completed",
-                    error=f"PredictionFallback:{type(error).__name__}",
+                    status="failed",
+                    error=f"{error_type}: {error_message}",
                     prediction_attempts=attempt_index + 1,
                     prediction_failure_types=failure_types,
                 )
+            fallback_label, fallback_reason = _fallback_outcome(
+                prepared.case_evidence,
+                default=self.prediction_fallback_label,
+            )
+            return PredictionResult(
+                case_id=prepared.case.case_id,
+                prediction=fallback_label,
+                case_evidence=prepared.case_evidence,
+                law_evidence=prepared.law_evidence,
+                reasoning=fallback_reason,
+                api_calls=prepared.api_calls,
+                latency_seconds=time.perf_counter() - started,
+                status="completed",
+                error=f"PredictionFallback:{error_type}",
+                prediction_attempts=attempt_index + 1,
+                prediction_failure_types=failure_types,
+            )
         raise RuntimeError("Prediction retry loop terminated unexpectedly")
 
     def _emit_prediction_retry(self, **event: object) -> None:
@@ -263,6 +292,7 @@ def _fallback_outcome(
 
 
 def _clear_cuda_cache_after_case_failure() -> None:
+    gc.collect()
     try:
         import torch
 
@@ -270,6 +300,17 @@ def _clear_cuda_cache_after_case_failure() -> None:
             torch.cuda.empty_cache()
     except Exception:
         return
+
+
+def _is_cuda_oom(error: Exception) -> bool:
+    if type(error).__name__ in {"OutOfMemoryError", "CUDAOutOfMemoryError"}:
+        return True
+    try:
+        import torch
+
+        return isinstance(error, torch.cuda.OutOfMemoryError)
+    except Exception:
+        return False
 
 
 def build_law_query(
