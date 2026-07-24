@@ -8,6 +8,7 @@ import pytest
 import alqac2026.colab_workflow as colab_workflow
 from alqac2026.colab_workflow import (
     _require_smoke_gate,
+    _run_model_gate,
     _validate_public_selection_run,
     _validate_stage_result,
     _verify_existing_export,
@@ -57,6 +58,42 @@ def test_full_requires_smoke_gate_on_same_commit_and_config(tmp_path):
         _require_smoke_gate(tmp_path, {"commit": "b" * 40}, "config-a")
     with pytest.raises(ValueError, match="pinned commit"):
         _require_smoke_gate(tmp_path, {"commit": "a" * 40}, "config-b")
+
+
+def test_model_gate_reports_failed_stage_from_runtime_artifact(
+    tmp_path, monkeypatch
+):
+    workflow_root = tmp_path / "workflow"
+    workflow_root.mkdir()
+
+    def fail_runtime(command, cwd, check):
+        (workflow_root / "runtime_check.json").write_text(
+            json.dumps(
+                {
+                    "status": "failed",
+                    "api_network_attempts": 0,
+                    "failed_stage": "generation",
+                    "error_type": "OutOfMemoryError",
+                }
+            )
+        )
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(colab_workflow.subprocess, "run", fail_runtime)
+
+    with pytest.raises(
+        RuntimeError,
+        match="stage=generation, error_type=OutOfMemoryError",
+    ):
+        _run_model_gate(
+            repo_root=tmp_path,
+            workflow_root=workflow_root,
+            config_path=tmp_path / "workflow_config.json",
+            input_path=tmp_path / "private.json",
+            local_index=tmp_path / "law-index",
+            source_pin={"commit": "a" * 40},
+            adapter_path=None,
+        )
 
 
 def test_smoke_rejects_degraded_cases_but_full_may_export_them(tmp_path):

@@ -43,15 +43,22 @@ def main() -> None:
         ),
         "config_sha256": sha256_file(args.config),
         "stages": {},
+        "current_stage": "preflight",
     }
     write_json(output, report)
     original_excepthook = sys.excepthook
 
     def record_failure(error_type, error, traceback) -> None:
         report["status"] = "failed"
+        report["failed_stage"] = report.get("current_stage")
+        report["error_type"] = error_type.__name__
         report["error"] = f"{error_type.__name__}: {error}"
         write_json(output, report)
         original_excepthook(error_type, error, traceback)
+
+    def start_stage(name: str) -> None:
+        report["current_stage"] = name
+        write_json(output, report)
 
     sys.excepthook = record_failure
     if not args.allow_cpu and not environment["cuda"]["available"]:
@@ -65,6 +72,7 @@ def main() -> None:
     articles = load_law_corpus(config["paths"]["corpus"])
     case = load_inference_cases(args.input)[0]
 
+    start_stage("query_planner")
     started = time.perf_counter()
     planner = create_query_planner(config["case_retrieval"]["query_planner"])
     try:
@@ -73,25 +81,20 @@ def main() -> None:
         planner.release()
     if not planner_result.plan.main_claim:
         raise RuntimeError("Runtime planner and fallback did not produce main_claim")
-    if (
-        config["case_retrieval"]["query_planner"]["strategy"] == "llm_assisted"
-        and planner_result.strategy != "llm"
-    ):
-        raise RuntimeError(
-            "Runtime LLM query planner did not pass validation: "
-            f"{planner_result.failure_code or planner_result.failure_type}"
-        )
     report["stages"]["query_planner"] = {
         "status": "PASS",
         "seconds": round(time.perf_counter() - started, 3),
         "strategy": planner_result.strategy,
+        "fallback_used": planner_result.strategy != "llm",
         "failure_type": planner_result.failure_type,
         "failure_code": planner_result.failure_code,
     }
+    write_json(output, report)
 
     law_config = dict(config["law_retrieval"])
     law_config["strategy"] = "hybrid_rerank"
     law_config["index_dir"] = config["paths"]["law_index"]
+    start_stage("embedding")
     started = time.perf_counter()
     law_retriever = create_law_retriever(articles, law_config)
     if not isinstance(law_retriever, HybridLawRetriever):
@@ -103,7 +106,9 @@ def main() -> None:
         "seconds": round(time.perf_counter() - started, 3),
         "candidate_count": len(candidate_indices),
     }
+    write_json(output, report)
 
+    start_stage("reranker")
     started = time.perf_counter()
     law_evidence = law_retriever.rerank_candidates(
         case.case_query,
@@ -116,7 +121,9 @@ def main() -> None:
         "seconds": round(time.perf_counter() - started, 3),
         "evidence_count": len(law_evidence),
     }
+    write_json(output, report)
 
+    start_stage("generation")
     started = time.perf_counter()
     predictor = create_predictor(config["prediction"])
     try:
@@ -127,6 +134,9 @@ def main() -> None:
             allow_prediction_fallback=False,
             max_prediction_retries=int(
                 config["prediction"].get("max_case_retries", 0)
+            ),
+            max_oom_retries=int(
+                config["prediction"].get("max_oom_retries", 1)
             ),
         )
         prediction_result = prediction_pipeline.predict_prepared(
@@ -146,6 +156,7 @@ def main() -> None:
         "prediction_failure_types": prediction_result.prediction_failure_types,
     }
     report["status"] = "PASS"
+    report["current_stage"] = None
     report["models"] = {
         "query_planner": config["case_retrieval"]["query_planner"]["model_name"],
         "query_planner_revision": config["case_retrieval"]["query_planner"].get(

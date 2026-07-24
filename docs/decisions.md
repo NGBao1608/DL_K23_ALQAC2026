@@ -133,6 +133,12 @@ resumes only its own checkpoint directory. Stage differences are restricted to
 case count, stage directory, case-count-derived network cap, and gate state. A
 new `RUN_ID` is required to adopt newer code or configuration.
 
+The zero-API runtime gate accepts a valid deterministic planner fallback and
+records it as `fallback_used`; this matches D-014. It checkpoints the active
+model stage and records the failing stage and exception type so the notebook
+can distinguish planner, embedding, reranker, and generation failures without
+making a Case Content API request.
+
 Public live retrieval requires explicit approval and produces local outcome/law
 evaluation. Private uses the organizer-provided Private law corpus and the
 Public full run's selected law top-k scalar, but never reads Public gold.
@@ -252,3 +258,20 @@ Repeating the original allocation two additional times was rejected because a
 Colab T4. This observation is diagnostic only until the complete run artifact
 is reviewed. A clean Private smoke on the pinned commit/config remains
 mandatory before full.
+
+## D-019: Fail-safe runtime-gate diagnostics
+
+**Status:** Accepted and `CPU/mock verified`
+
+The first `private-candidate-v1` smoke stopped inside the zero-API
+`check_runtime.py` subprocess before retrieval. The notebook traceback exposed
+only `CalledProcessError`; without the Drive `runtime_check.json` artifact, the
+exact failing model stage is not claimed.
+
+The runtime checker now checkpoints `current_stage`, `failed_stage`, and
+`error_type`, while the Colab workflow raises a stage-specific error with the
+artifact path. A valid deterministic query-planner fallback is a passing result
+under D-014 rather than a fatal runtime failure. Embedding, reranker, required
+outcome model-load, and validated generation failures remain fail-fast. Because
+`private-candidate-v1` is already source-pinned, this replacement starts with
+the unused `private-candidate-v2` run identity.

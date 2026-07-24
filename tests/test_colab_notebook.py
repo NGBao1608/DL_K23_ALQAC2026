@@ -95,6 +95,7 @@ def test_private_notebook_uses_private_inputs_without_evaluator():
     assert "PUBLIC_FULL / 'validation.json'" in text
     assert "PUBLIC_FULL / 'manifest.json'" in text
     assert "PUBLIC_RUN_ID = 'public-candidate-v7'" in text
+    assert "RUN_ID = 'private-candidate-v2'" in text
     assert "PYTORCH_CUDA_ALLOC_CONF" in text
     assert "ALQAC_TEAM_TOKEN" in text
     assert "metrics.json" not in text
@@ -110,6 +111,8 @@ def test_runtime_check_has_no_case_api_or_team_token_dependency():
     assert "ALQAC_TEAM_TOKEN" not in text
     assert '"api_network_attempts": 0' in text
     assert 'report["stages"]["query_planner"]' in text
+    assert '"fallback_used": planner_result.strategy != "llm"' in text
+    assert "Runtime LLM query planner did not pass validation" not in text
     assert 'report["stages"]["embedding"]' in text
     assert 'report["stages"]["reranker"]' in text
     assert text.index('report["stages"]["query_planner"]') < text.index(

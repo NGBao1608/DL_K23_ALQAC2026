@@ -88,7 +88,8 @@ Smoke performs all safety gates in one operation:
    `source_pin.json`;
 2. restore the shared SQLite cache and the fingerprinted law index;
 3. run the query planner, embedding, reranker, and Qwen through
-   `scripts/check_runtime.py` with zero Case Content API attempts; and
+   `scripts/check_runtime.py` with zero Case Content API attempts (a valid
+   deterministic planner fallback is accepted and recorded); and
 4. run exactly two live cases with a hard cap of six network attempts
    (`2 cases × 3 attempts`).
 
@@ -98,6 +99,13 @@ directory and automatically resumes that directory after interruption. Smoke
 checkpoints are never promoted into the full prediction set; the shared query
 plans, evidence cache, and law index are reused. Create a new `RUN_ID` to adopt
 newer source code or a different workflow configuration.
+
+If the zero-API subprocess fails, inspect `<run-root>/runtime_check.json`. The
+wrapper reports its `failed_stage` and `error_type`; no Case Content API budget
+has been consumed at this point. The source-pinned `private-candidate-v1`
+failure must not be resumed with replacement code. Start the fixed notebook as
+`private-candidate-v2`, complete its two-case smoke, and keep that same run ID
+for full only after the smoke gate passes.
 
 ## 4. Public quality evaluation
 
@@ -188,6 +196,7 @@ The official competition website encourages a short technical report and says or
 
 | Failure | Action |
 |---|---|
+| Generic `CalledProcessError` from `check_runtime.py` | Inspect `runtime_check.json` for the last model stage. On the fixed workflow the wrapper reports `failed_stage` and `error_type`; use a new `RUN_ID` when adopting that fix. |
 | HTML/ngrok response | Record safe status/content type/error code; do not expose headers or token; wait for organizer infrastructure. |
 | `403` JSON response | Check secret name/value and organizer activation; do not retry. |
 | `422` | Fix `query`/`case_id`; do not repeat malformed calls. |

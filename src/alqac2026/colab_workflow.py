@@ -279,7 +279,18 @@ def _run_model_gate(
     ]
     if adapter_path:
         command.extend(["--adapter-path", str(adapter_path)])
-    subprocess.check_call(command, cwd=repo_root)
+    completed = subprocess.run(command, cwd=repo_root, check=False)
+    if completed.returncode:
+        report = _read_json(report_path) if report_path.is_file() else {}
+        failed_stage = report.get(
+            "failed_stage", report.get("current_stage", "unknown")
+        )
+        error_type = report.get("error_type", "unknown")
+        raise RuntimeError(
+            "Model-only runtime check failed before any Case Content API call: "
+            f"stage={failed_stage}, error_type={error_type}. "
+            f"Inspect {report_path}"
+        )
     report = _read_json(report_path)
     if report.get("status") != "PASS" or report.get("api_network_attempts") != 0:
         raise RuntimeError("Model-only runtime check did not pass")

@@ -45,7 +45,7 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 | Task name | Purpose | Related files/modules | Expected output | Current status |
 |---|---|---|---|---|
 | Clean-kernel replay | Prove setup is reproducible | Colab notebook, Colab requirements | Restart & Run All succeeds on a fresh T4 runtime | Not implemented yet |
-| Run Private candidate | Use `public-candidate-v7` law-top-k profile and the memory-safe Qwen3-8B candidate | Private Colab notebook, Drive artifacts | 2-case smoke PASS, then 60 completed validated cases under the same Private `RUN_ID` | Not implemented yet |
+| Run Private candidate | Use `public-candidate-v7` law-top-k profile and the memory-safe Qwen3-8B candidate | Private Colab notebook, Drive artifacts | `private-candidate-v2` two-case smoke PASS, then 60 completed validated cases under the same Private `RUN_ID` | Not implemented yet |
 | Pin final environment | Freeze dependencies and model revisions | Requirements/config/manifest | Reproducible environment record | implemented |
 | Maintain experiment registry | Prevent unsupported score claims | `docs/experiments.md`, run manifests | Every result references config, Git revision, artifacts, and API count | implemented |
 | Prepare source bundle | Deliver clean source without secrets/data/cache | Packaging script | Audited source archive | CPU/mock verified |

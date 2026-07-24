@@ -48,6 +48,14 @@ in this repository, so no v7 accuracy, Law F1, or verification status is
 recorded here. The excerpt motivated D-018; its replacement remains
 `CPU/mock verified` until Private smoke runs on a clean T4.
 
+The first `private-candidate-v1` smoke stopped in the zero-API runtime checker
+before any Case Content API request. The available notebook traceback contains
+only the subprocess exit code, so the exact failed model stage is not claimed
+without its Drive `runtime_check.json`. D-019 adds stage-specific diagnostics
+and removes the contradictory fatal handling of a successful deterministic
+planner fallback. The replacement `private-candidate-v2` workflow is
+`CPU/mock verified` only until its clean T4 smoke completes.
+
 ## Official format revision
 
 The leaderboard announcement rechecked on 2026-07-20 changed/clarified evidence submission:

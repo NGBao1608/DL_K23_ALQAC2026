@@ -79,6 +79,14 @@ operative verdict plus main claim, remedy/object scope, and an adaptive missing
 scope query. It never sends the full normalized `case_query` and never predicts
 the winner or acceptance result.
 
+The zero-API runtime gate checkpoints `current_stage` before planner,
+embedding, reranker, and generation work. On failure it persists
+`failed_stage` and `error_type` in `runtime_check.json`, and the Colab wrapper
+reports those fields instead of exposing only a generic subprocess error. A
+valid deterministic planner fallback passes this gate because it is the
+designed recovery path. Embedding, reranker, required outcome model-load, and
+validated generation failures remain fatal before any Case Content API call.
+
 ### Retrieval and sufficiency gate
 
 Live retrieval:
