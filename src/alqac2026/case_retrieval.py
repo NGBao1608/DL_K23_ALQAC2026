@@ -26,6 +26,22 @@ class ApiBudgetExceeded(RuntimeError):
     """Raised before an HTTP request would exceed the approved run budget."""
 
 
+class CaseApiRequestError(RuntimeError):
+    """A safe case-scoped API failure that retrieval may degrade around."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        retryable: bool,
+        status_code: int | None = None,
+    ):
+        super().__init__(code)
+        self.code = code
+        self.retryable = retryable
+        self.status_code = status_code
+
+
 def normalize_query(query: str) -> str:
     return re.sub(r"\s+", " ", query).strip().lower()
 
@@ -369,6 +385,7 @@ class CaseContentClient:
             },
         )
         self.per_case_cache_hits: dict[str, int] = defaultdict(int)
+        self.per_case_failure_codes: dict[str, list[str]] = defaultdict(list)
 
     def _emit_progress(self, **event: object) -> None:
         if self.progress_callback is None:
@@ -407,17 +424,34 @@ class CaseContentClient:
             self.max_network_attempts_per_case - self.per_case_attempts[case_id],
         )
 
+    def remaining_global_attempts(self) -> int | None:
+        if self.max_network_calls is None:
+            return None
+        return max(0, self.max_network_calls - self.network_calls)
+
     def can_retrieve(self, case_id: str, query: str) -> bool:
-        return self.cache.contains(case_id, query) or self.remaining_case_attempts(
-            case_id
-        ) > 0
+        if self.cache.contains(case_id, query):
+            return True
+        global_remaining = self.remaining_global_attempts()
+        return self.remaining_case_attempts(case_id) > 0 and (
+            global_remaining is None or global_remaining > 0
+        )
+
+    def record_retrieval_failure(self, case_id: str, code: str) -> None:
+        if code not in self.per_case_failure_codes[case_id]:
+            self.per_case_failure_codes[case_id].append(code)
 
     def _backup_cache(self) -> None:
         if self.backup_path is not None:
             self.cache.backup_to(self.backup_path)
 
     def retrieve(
-        self, case_id: str, query: str, query_type: str = "unknown"
+        self,
+        case_id: str,
+        query: str,
+        query_type: str = "unknown",
+        *,
+        max_attempts: int | None = None,
     ) -> list[dict]:
         cached = self.cache.get(case_id, query)
         if cached is not None:
@@ -439,7 +473,12 @@ class CaseContentClient:
             # prevents ngrok's browser-warning HTML from intercepting API requests.
             "ngrok-skip-browser-warning": "alqac2026-api-client",
         }
-        for attempt in range(self.retries):
+        attempt_limit = self.retries if max_attempts is None else min(
+            self.retries, max_attempts
+        )
+        if attempt_limit < 1:
+            raise ValueError("max_attempts must be positive")
+        for attempt in range(attempt_limit):
             self._throttle()
             self._claim_network_budget(case_id)
             network_attempt = self.network_calls
@@ -480,7 +519,11 @@ class CaseContentClient:
                     exception_type=type(error).__name__,
                     latency_seconds=latency_seconds,
                 )
-                if attempt + 1 < self.retries:
+                can_retry = (
+                    attempt + 1 < attempt_limit
+                    and self.can_retrieve(case_id, query)
+                )
+                if can_retry:
                     retry_delay_seconds = self.request_interval_seconds * (2**attempt)
                     self._emit_progress(
                         status="retry_scheduled",
@@ -492,7 +535,10 @@ class CaseContentClient:
                     )
                     self.sleep(retry_delay_seconds)
                     continue
-                raise
+                raise CaseApiRequestError(
+                    "network_exception",
+                    retryable=True,
+                ) from error
             self._last_call = self.clock()
             latency_seconds = round(time.perf_counter() - request_started, 3)
             if response.status_code == 200:
@@ -573,7 +619,7 @@ class CaseContentClient:
                 status_code=response.status_code,
                 latency_seconds=latency_seconds,
             )
-            if response.status_code == 403:
+            if response.status_code in {401, 403}:
                 content_type = response.headers.get("Content-Type", "unknown")
                 server = response.headers.get("Server", "unknown")
                 request_id = response.headers.get(
@@ -581,15 +627,23 @@ class CaseContentClient:
                 )
                 ngrok_codes = sorted(set(re.findall(r"ERR_NGROK_\d+", response.text)))
                 raise PermissionError(
-                    "Case API rejected ALQAC_TEAM_TOKEN (403); "
+                    f"Case API rejected ALQAC_TEAM_TOKEN ({response.status_code}); "
                     f"url={response.url}; server={server}; content_type={content_type}; "
                     f"request_id={request_id}; ngrok_codes={ngrok_codes or 'none'}; "
                     "response_body=<redacted>"
                 )
-            if response.status_code == 422:
-                raise ValueError("Malformed Case API request (422); payload redacted")
+            if response.status_code in {400, 422}:
+                raise CaseApiRequestError(
+                    "malformed_request",
+                    retryable=False,
+                    status_code=response.status_code,
+                )
             if response.status_code == 429 or 500 <= response.status_code < 600:
-                if attempt + 1 < self.retries:
+                can_retry = (
+                    attempt + 1 < attempt_limit
+                    and self.can_retrieve(case_id, query)
+                )
+                if can_retry:
                     retry_delay_seconds = self.request_interval_seconds * (2**attempt)
                     self._emit_progress(
                         status="retry_scheduled",
@@ -601,8 +655,17 @@ class CaseContentClient:
                     )
                     self.sleep(retry_delay_seconds)
                     continue
-            response.raise_for_status()
-        raise RuntimeError(f"Case API failed after {self.retries} attempts: {case_id}")
+                raise CaseApiRequestError(
+                    "rate_limited" if response.status_code == 429 else "server_error",
+                    retryable=True,
+                    status_code=response.status_code,
+                )
+            raise CaseApiRequestError(
+                "http_error",
+                retryable=False,
+                status_code=response.status_code,
+            )
+        raise RuntimeError(f"Case API failed after {attempt_limit} attempts: {case_id}")
 
 
 class CachedCaseContentClient:
@@ -620,12 +683,17 @@ class CachedCaseContentClient:
         self.cache_hits = 0
         self.cache_misses = 0
         self.per_case_cache_hits: dict[str, int] = defaultdict(int)
+        self.per_case_failure_codes: dict[str, list[str]] = defaultdict(list)
 
     def remaining_case_attempts(self, case_id: str) -> int:
         return 0
 
     def can_retrieve(self, case_id: str, query: str) -> bool:
         return True
+
+    def record_retrieval_failure(self, case_id: str, code: str) -> None:
+        if code not in self.per_case_failure_codes[case_id]:
+            self.per_case_failure_codes[case_id].append(code)
 
     def _emit_progress(self, **event: object) -> None:
         if self.progress_callback is None:
@@ -636,7 +704,12 @@ class CachedCaseContentClient:
             return
 
     def retrieve(
-        self, case_id: str, query: str, query_type: str = "unknown"
+        self,
+        case_id: str,
+        query: str,
+        query_type: str = "unknown",
+        *,
+        max_attempts: int | None = None,
     ) -> list[dict]:
         cached = self.cache.get(case_id, query)
         if cached is None:
@@ -681,10 +754,48 @@ class CaseEvidenceRetriever:
         evidence: dict[str, CaseEvidence] = {}
         raw_evidence: list[CaseEvidence] = []
 
-        def execute(query) -> None:
-            for hit in self.client.retrieve(
-                case.case_id, query.text, query_type=query.query_type
-            ):
+        def policy_event(status: str, query, **details) -> None:
+            emit = getattr(self.client, "_emit_progress", None)
+            if emit is not None:
+                emit(
+                    status=status,
+                    case_id=case.case_id,
+                    query_type=query.query_type,
+                    **details,
+                )
+
+        def record_failure(code: str) -> None:
+            recorder = getattr(self.client, "record_retrieval_failure", None)
+            if recorder is not None:
+                recorder(case.case_id, code)
+
+        def execute(query) -> tuple[bool, CaseApiRequestError | None]:
+            if not self.client.can_retrieve(case.case_id, query.text):
+                record_failure("budget_exhausted")
+                policy_event("query_skipped_budget", query)
+                return False, None
+            try:
+                hits = self.client.retrieve(
+                    case.case_id,
+                    query.text,
+                    query_type=query.query_type,
+                    max_attempts=1,
+                )
+            except ApiBudgetExceeded:
+                record_failure("budget_exhausted")
+                policy_event("query_skipped_budget", query)
+                return False, None
+            except CaseApiRequestError as error:
+                record_failure(error.code)
+                policy_event(
+                    "query_failed",
+                    query,
+                    error_code=error.code,
+                    retryable=error.retryable,
+                    status_code=error.status_code,
+                )
+                return False, error
+            for hit in hits:
                 item = CaseEvidence(
                     chunk_id=str(hit["chunk_id"]),
                     text=str(hit.get("text", "")),
@@ -695,19 +806,49 @@ class CaseEvidenceRetriever:
                 previous = evidence.get(item.chunk_id)
                 if previous is None or item.score > previous.score:
                     evidence[item.chunk_id] = item
+            return True, None
 
-        for query in queries[: self.primary_queries]:
-            execute(query)
+        primary_success: dict[int, bool] = {}
+        retry_candidates: list[tuple[int, object]] = []
+        for index, query in enumerate(queries[: self.primary_queries]):
+            success, error = execute(query)
+            primary_success[index] = success
+            if error is not None and error.retryable:
+                retry_candidates.append((index, query))
+
+        retry_used = False
+        if retry_candidates:
+            index, query = retry_candidates[0]
+            if self.client.can_retrieve(case.case_id, query.text):
+                retry_used = True
+                policy_event("retry_scheduled", query, retry_scope="case")
+                success, _ = execute(query)
+                primary_success[index] = success
+
         sufficiency = evaluate_evidence_sufficiency(raw_evidence, stored_plan.plan)
         if (
-            not sufficiency.sufficient
+            all(
+                primary_success.get(index, False)
+                for index in range(self.primary_queries)
+            )
+            and not sufficiency.sufficient
             and len(queries) > self.primary_queries
             and self.client.can_retrieve(
                 case.case_id,
                 queries[self.primary_queries].text,
             )
         ):
-            execute(queries[self.primary_queries])
+            adaptive = queries[self.primary_queries]
+            success, error = execute(adaptive)
+            if (
+                not success
+                and error is not None
+                and error.retryable
+                and not retry_used
+                and self.client.can_retrieve(case.case_id, adaptive.text)
+            ):
+                policy_event("retry_scheduled", adaptive, retry_scope="case")
+                execute(adaptive)
         return list(evidence.values()), self.client.network_calls - before
 
 

@@ -57,14 +57,16 @@ The following Public-only fields must never become inference features: `verdict_
 
 The planner runs before law retrieval and outcome generation:
 
-1. pinned `Qwen/Qwen3-0.6B` at revision
-   `c1899de289a04d12100db370d81485cdf75e47ca` attempts a deterministic,
+1. pinned NF4 4-bit `Qwen/Qwen3-8B` at revision
+   `b968826d9c46dd6066d109eabc6255188de91218` attempts a deterministic,
    thinking-disabled structured plan with a 256-token output limit and
    deadline-aware 12-second generation stop;
-2. output is validated for exact schema, required claim/remedy/object coverage,
-   canonical case type, and lexical grounding in `case_query`;
+2. the prompt includes query-derived deterministic lexical hints, and output is
+   validated for exact schema, required claim/remedy/object coverage, canonical
+   case type, and lexical grounding in `case_query`;
 3. load, generation, timeout, JSON, validation, or runtime failure selects the
-   deterministic planner without failing the case; and
+   deterministic planner without failing the case, while a classified
+   `planner_failure_code` is persisted without raw model/query text; and
 4. the planner backend is released before law retrieval models load.
 
 The plan contains `case_type`, `main_claim`, `requested_remedies`,
@@ -81,17 +83,26 @@ the winner or acceptance result.
 
 Live retrieval:
 
-- always attempts the two primary queries subject to remaining budget;
+- attempts each primary query once, subject to cache and remaining budget,
+  before assigning the one case-level retry;
 - checks operative markers, court/Hội đồng xét xử source role, claim/object
   overlap, accepted/rejected scope, procedural/party-statement negatives, and
   duplicate `chunk_id`;
 - issues the third query only when the gate fails and budget remains;
 - calls official `POST /retrieve` with `X-API-Key`;
 - enforces a five-second interval;
-- permits at most one retry for timeout, `429`, or `5xx`;
+- permits at most one case-level retry for timeout, `429`, or `5xx`;
 - does not retry `400`, `401`, `403`, or `422`;
 - caches successful responses in SQLite; and
 - de-duplicates results by exact `chunk_id`.
+
+The third network attempt is allocated to a failed primary retry first, or to
+adaptive Q3 when both primary requests succeeded and the evidence gate failed.
+When the global/per-case budget is exhausted, or a case receives a classified
+request failure, retrieval records a safe degradation code and continues with
+cached/partial evidence. Token/authentication, malformed successful-response,
+SQLite integrity, and external-backup failures remain fail-fast because they
+are systemic or safety-critical.
 
 Important retrieval phrases include “chấp nhận yêu cầu khởi kiện”, “không chấp nhận yêu cầu khởi kiện”, “Hội đồng xét xử nhận định”, and “Tuyên xử”.
 
@@ -113,7 +124,10 @@ backup before another request is attempted. On resume, a new live client
 repairs pending backup state before returning a cache hit or sending a request;
 backup failure stops the run.
 
-During retrieval, `ALQAC_PROGRESS` records safe lifecycle events (`request_started`, `request_completed`, `http_error`, `request_exception`, `retry_scheduled`, `cache_hit`, and `cache_miss`) without exposing query text, response text, headers, or secrets.
+During retrieval, `ALQAC_PROGRESS` records safe lifecycle events
+(`request_started`, `request_completed`, `http_error`, `request_exception`,
+`retry_scheduled`, `query_failed`, `query_skipped_budget`, `cache_hit`, and
+`cache_miss`) without exposing query text, response text, headers, or secrets.
 
 The query-plan artifact is reused only when its fingerprint matches `case_id`,
 raw `case_query` SHA-256, configured planner strategy/model revision, prompt
@@ -121,9 +135,10 @@ version, and composer version. It is internal, absent from `ALQAC_PROGRESS`,
 submission, and exports.
 
 Status: structured fallback planning, composer, evidence gate, adaptive policy,
-cache, retry, preflight, budget guards, resume ledger, and artifact exclusion
-are `CPU/mock verified`; the pinned planner and refreshed official API path are
-not yet `GPU/API verified`.
+cache, budget-aware retry scheduling, fail-soft case retrieval, preflight,
+budget guards, resume ledger, and artifact exclusion are `CPU/mock verified`;
+the pinned 8B planner and refreshed official API path are not yet
+`GPU/API verified`.
 
 Because API calls accumulate permanently across runs, broad query experimentation is prohibited without a reviewed call budget.
 
@@ -173,7 +188,17 @@ The model must emit:
 }
 ```
 
-The parser validates JSON, ratio range, and the official `>50%` boundary. Numeric ratios deterministically normalize inconsistent labels. Partial or inconsistent results receive one deterministic verifier pass; a malformed first output receives one repair. Unrecoverable output creates a failed result that cannot be submitted. `adapter_path` optionally loads an approved PEFT adapter.
+The parser validates JSON, ratio range, and the official `>50%` boundary.
+Numeric ratios deterministically normalize inconsistent labels. Partial or
+inconsistent results receive one deterministic verifier pass; a malformed
+first output receives one repair. After those paths, a remaining case-scoped
+prediction error uses an explicitly configured deterministic fallback.
+Operative court language maps clear full acceptance/rejection first;
+unquantified partial acceptance maps conservatively to `PARTIAL_B_WIN`; the
+configured default is `B_WIN` when no trustworthy operative scope exists.
+This produces a complete format-valid result while recording
+`PredictionFallback:<error type>` internally. Model-load failure remains
+fail-fast. `adapter_path` optionally loads an approved PEFT adapter.
 
 Offline fine-tuning may use Public gold to construct labels, accepted/rejected
 scope, and reasoning targets. Inputs must remain production-equivalent:
@@ -183,7 +208,13 @@ one case remain in one fold. Report out-of-fold accuracy/confusion matrix, lock
 hyperparameters, then train the final adapter on all Public cases. A training
 notebook is `Not implemented yet`.
 
-Status: `implemented`; not yet supported by a clean recorded `GPU/API verified` run.
+Smoke rejects any planner, retrieval, or prediction degradation. Full records
+`degraded_cases`, `planner_fallbacks`, and `fallback_predictions` in its
+manifest and validation artifacts so a complete submission can be reviewed
+before manual upload.
+
+Status: fallback completion is `CPU/mock verified`; the model path is not yet
+supported by a clean recorded `GPU/API verified` run.
 
 The pinned Qwen3-8B, Vietnamese Embedding, and Vietnamese Reranker revisions are public, ungated, Apache-2.0, and each below the official 10-billion-parameter limit according to their Hugging Face metadata checked on 2026-07-20. The production pipeline loads these weights locally, does not call a proprietary model API, and must not use externally annotated legal QA or legal entailment datasets.
 

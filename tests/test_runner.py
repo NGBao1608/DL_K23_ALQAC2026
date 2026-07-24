@@ -165,6 +165,37 @@ def test_mock_pipeline_does_not_load_query_planner_or_api(tmp_path, monkeypatch)
     assert result["validation"]["status"] == "PASS"
 
 
+def test_case_prediction_failure_still_builds_complete_flagged_submission(
+    tmp_path, monkeypatch
+):
+    _patch_small_run(monkeypatch)
+
+    class FailingBackend:
+        def generate(self, system_prompt, user_prompt):
+            raise ValueError("case generation failed")
+
+    monkeypatch.setattr(runner, "FixedBackend", FailingBackend)
+    run_dir = tmp_path / "fallback"
+    result = runner.run_experiment(
+        "configs/baseline.yaml",
+        "input.json",
+        resume_run=run_dir,
+        mock=True,
+        limit=1,
+    )
+    submission = json.loads(
+        (run_dir / "submission.json").read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (run_dir / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert result["validation"]["status"] == "PASS"
+    assert submission[0]["prediction"] == "B_WIN"
+    assert manifest["run"]["completed"] == 1
+    assert manifest["run"]["fallback_predictions"] == 1
+    assert manifest["run"]["degraded_cases"] == 1
+
+
 def test_cache_only_run_uses_real_pipeline_without_network_or_token(
     tmp_path, monkeypatch
 ):

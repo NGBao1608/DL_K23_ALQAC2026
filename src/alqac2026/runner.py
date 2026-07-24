@@ -34,7 +34,7 @@ from .query_planning import (
     QueryPlanStore,
     create_query_planner,
 )
-from .schemas import InferenceCase
+from .schemas import InferenceCase, OutcomeLabel
 from .submission import build_submission, validate_submission
 
 
@@ -247,8 +247,15 @@ def run_experiment(
     )
     cache = None
     client = None
+    planner_fallback_case_ids: set[str] = set()
     checkpoint = CheckpointStore(run_dir / "predictions.checkpoint.json")
     prepared_store = PreparedCaseStore(run_dir / "contexts.checkpoint.json")
+    case_status_path = run_dir / "case_status.json"
+    case_status = (
+        json.loads(case_status_path.read_text(encoding="utf-8"))
+        if case_status_path.exists()
+        else {}
+    )
     results_by_id = {}
     try:
         pending_cases = []
@@ -317,6 +324,20 @@ def run_experiment(
                             ),
                         )
                         query_plans[case.case_id] = stored_plan
+                        if (
+                            planner_config["strategy"] == "llm_assisted"
+                            and stored_plan.planner_strategy != "llm"
+                        ):
+                            planner_fallback_case_ids.add(case.case_id)
+                        case_status.setdefault(case.case_id, {}).update(
+                            {
+                                "planner_strategy": stored_plan.planner_strategy,
+                                "planner_failure_code": (
+                                    stored_plan.planner_failure_code
+                                ),
+                            }
+                        )
+                        write_json(case_status_path, case_status)
                         _emit_progress(
                             stage="query_planning",
                             status="completed",
@@ -325,6 +346,7 @@ def run_experiment(
                             total=len(cases),
                             planner_strategy=stored_plan.planner_strategy,
                             planner_failure_type=stored_plan.planner_failure_type,
+                            planner_failure_code=stored_plan.planner_failure_code,
                             query_count=len(stored_plan.queries),
                         )
                 finally:
@@ -435,6 +457,14 @@ def run_experiment(
                     raise
                 prepared_store.put(prepared)
                 prepared_by_id[case.case_id] = prepared
+                case_status.setdefault(case.case_id, {})[
+                    "retrieval_failure_codes"
+                ] = (
+                    list(client.per_case_failure_codes.get(case.case_id, []))
+                    if client
+                    else []
+                )
+                write_json(case_status_path, case_status)
                 _emit_progress(
                     stage="preparation",
                     status="completed",
@@ -457,7 +487,17 @@ def run_experiment(
                 if mock
                 else create_predictor(config["prediction"])
             )
-            prediction_pipeline = ALQACPipeline(None, None, predictor)
+            prediction_pipeline = ALQACPipeline(
+                None,
+                None,
+                predictor,
+                allow_prediction_fallback=bool(
+                    config["prediction"].get("allow_case_fallback", True)
+                ),
+                prediction_fallback_label=OutcomeLabel(
+                    config["prediction"].get("fallback_label", "B_WIN")
+                ),
+            )
             for case in pending_cases:
                 position = case_positions[case.case_id]
                 _emit_progress(
@@ -470,6 +510,13 @@ def run_experiment(
                 result = prediction_pipeline.predict_prepared(prepared_by_id[case.case_id])
                 checkpoint.put(result)
                 results_by_id[case.case_id] = result
+                case_status.setdefault(case.case_id, {})[
+                    "prediction_fallback"
+                ] = bool(
+                    result.error
+                    and result.error.startswith("PredictionFallback:")
+                )
+                write_json(case_status_path, case_status)
                 progress_details = {
                     "prediction": (
                         result.prediction.value if result.prediction else None
@@ -553,17 +600,64 @@ def run_experiment(
             if cache is not None
             else 0
         )
+        if not mock and query_plan_path.exists():
+            stored_query_plans = json.loads(
+                query_plan_path.read_text(encoding="utf-8")
+            )
+            planner_fallback_case_ids.update(
+                case.case_id
+                for case in cases
+                if stored_query_plans.get(case.case_id, {}).get(
+                    "planner_strategy"
+                )
+                not in {None, "llm"}
+            )
+        fallback_case_ids = {
+            result.case_id
+            for result in results
+            if result.error and result.error.startswith("PredictionFallback:")
+        }
+        retrieval_degraded_case_ids = {
+            case.case_id
+            for case in cases
+            if case_status.get(case.case_id, {}).get(
+                "retrieval_failure_codes"
+            )
+        }
+        degraded_case_ids = (
+            fallback_case_ids
+            | retrieval_degraded_case_ids
+            | planner_fallback_case_ids
+        )
+        validation.update(
+            {
+                "degraded_cases": len(degraded_case_ids),
+                "fallback_predictions": len(fallback_case_ids),
+                "planner_fallbacks": len(planner_fallback_case_ids),
+            }
+        )
+        write_json(run_dir / "validation.json", validation)
         manifest["run"].update(
             {
                 "status": "completed",
                 "completed": sum(result.status == "completed" for result in results),
                 "api_calls": run_network_attempts,
                 "submission_law_top_k": selected_law_top_k,
+                "fallback_predictions": len(fallback_case_ids),
+                "planner_fallbacks": len(planner_fallback_case_ids),
+                "degraded_cases": len(degraded_case_ids),
             }
         )
         write_json(
             run_dir / "api_stats.json",
-            _api_stats(cases, client, cache, run_key, max_network_calls),
+            _api_stats(
+                cases,
+                client,
+                cache,
+                run_key,
+                max_network_calls,
+                case_status,
+            ),
         )
         write_json(run_dir / "manifest.json", manifest)
         _emit_progress(
@@ -598,7 +692,14 @@ def run_experiment(
         )
         write_json(
             run_dir / "api_stats.json",
-            _api_stats(cases, client, cache, run_key, max_network_calls),
+            _api_stats(
+                cases,
+                client,
+                cache,
+                run_key,
+                max_network_calls,
+                case_status,
+            ),
         )
         write_json(run_dir / "manifest.json", manifest)
         _emit_progress(
@@ -628,7 +729,15 @@ def _load_selection_top_k(path: str | Path | None) -> int | None:
     return value
 
 
-def _api_stats(cases, client, cache, run_key, max_network_calls) -> dict:
+def _api_stats(
+    cases,
+    client,
+    cache,
+    run_key,
+    max_network_calls,
+    case_status=None,
+) -> dict:
+    case_status = case_status or {}
     ledger_stats = (
         cache.run_attempt_stats(run_key)
         if cache is not None
@@ -642,6 +751,16 @@ def _api_stats(cases, client, cache, run_key, max_network_calls) -> dict:
             "successful_calls": int(ledger_case.get("successful_calls", 0)),
             "cache_hits": (
                 int(client.per_case_cache_hits.get(case.case_id, 0)) if client else 0
+            ),
+            "retrieval_failure_codes": (
+                list(
+                    case_status.get(case.case_id, {}).get(
+                        "retrieval_failure_codes",
+                        client.per_case_failure_codes.get(case.case_id, [])
+                        if client
+                        else [],
+                    )
+                )
             ),
         }
     return {

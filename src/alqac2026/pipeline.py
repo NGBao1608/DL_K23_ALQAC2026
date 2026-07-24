@@ -90,10 +90,20 @@ class PreparedCaseStore:
 
 
 class ALQACPipeline:
-    def __init__(self, case_retriever, law_retriever, predictor):
+    def __init__(
+        self,
+        case_retriever,
+        law_retriever,
+        predictor,
+        *,
+        allow_prediction_fallback: bool = False,
+        prediction_fallback_label: OutcomeLabel = OutcomeLabel.B_WIN,
+    ):
         self.case_retriever = case_retriever
         self.law_retriever = law_retriever
         self.predictor = predictor
+        self.allow_prediction_fallback = allow_prediction_fallback
+        self.prediction_fallback_label = prediction_fallback_label
 
     def prepare_case(self, case: InferenceCase, law_top_k: int = 5) -> PreparedCase:
         case_evidence, api_calls = self.case_retriever.retrieve(case)
@@ -118,6 +128,23 @@ class ALQACPipeline:
                 latency_seconds=time.perf_counter() - started,
             )
         except Exception as error:  # preserve progress and make failures explicit
+            if self.allow_prediction_fallback:
+                _clear_cuda_cache_after_case_failure()
+                fallback_label, fallback_reason = _fallback_outcome(
+                    prepared.case_evidence,
+                    default=self.prediction_fallback_label,
+                )
+                return PredictionResult(
+                    case_id=prepared.case.case_id,
+                    prediction=fallback_label,
+                    case_evidence=prepared.case_evidence,
+                    law_evidence=prepared.law_evidence,
+                    reasoning=fallback_reason,
+                    api_calls=prepared.api_calls,
+                    latency_seconds=time.perf_counter() - started,
+                    status="completed",
+                    error=f"PredictionFallback:{type(error).__name__}",
+                )
             return PredictionResult(
                 case_id=prepared.case.case_id,
                 prediction=None,
@@ -131,6 +158,71 @@ class ALQACPipeline:
 
     def predict_case(self, case: InferenceCase, law_top_k: int = 5) -> PredictionResult:
         return self.predict_prepared(self.prepare_case(case, law_top_k=law_top_k))
+
+
+def _fallback_outcome(
+    case_evidence: list[CaseEvidence],
+    *,
+    default: OutcomeLabel,
+) -> tuple[OutcomeLabel, str]:
+    """Choose a submission-safe label from operative evidence after case failure."""
+    priority = {
+        "operative_verdict": 0,
+        "adaptive_missing_scope": 1,
+        "remedy_scope": 2,
+    }
+    ordered = sorted(
+        case_evidence,
+        key=lambda item: (priority.get(item.query_type, 99), -item.score),
+    )
+    texts = [re.sub(r"\s+", " ", item.text).casefold() for item in ordered]
+    trustworthy = [
+        text
+        for text in texts
+        if any(
+            marker in text
+            for marker in ("hội đồng xét xử", "tuyên xử", "xử:", "quyết định")
+        )
+        and not any(
+            marker in text
+            for marker in (
+                "nguyên đơn trình bày",
+                "bị đơn cho rằng",
+                "đại diện viện kiểm sát đề nghị",
+            )
+        )
+    ]
+    combined = "\n".join(trustworthy)
+    if any(
+        marker in combined
+        for marker in (
+            "không chấp nhận toàn bộ",
+            "bác toàn bộ",
+            "không chấp nhận yêu cầu khởi kiện",
+            "bác yêu cầu khởi kiện",
+        )
+    ):
+        return OutcomeLabel.B_WIN, "Deterministic fallback from rejection language."
+    if "chấp nhận toàn bộ yêu cầu khởi kiện" in combined:
+        return OutcomeLabel.A_WIN, "Deterministic fallback from full-acceptance language."
+    if "chấp nhận một phần" in combined:
+        return (
+            OutcomeLabel.PARTIAL_B_WIN,
+            "Deterministic fallback for unquantified partial acceptance.",
+        )
+    if "chấp nhận yêu cầu khởi kiện" in combined:
+        return OutcomeLabel.A_WIN, "Deterministic fallback from acceptance language."
+    return default, "Configured fallback because no trustworthy operative scope was available."
+
+
+def _clear_cuda_cache_after_case_failure() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        return
 
 
 def build_law_query(

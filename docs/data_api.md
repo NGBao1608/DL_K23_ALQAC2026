@@ -190,7 +190,7 @@ Team rules:
 ## Current repository behavior
 
 - `query_planning.py` implements the structured deterministic planner, pinned
-  `Qwen/Qwen3-0.6B` LLM-assisted planner, validation/fallback, deterministic
+  NF4 4-bit `Qwen/Qwen3-8B` LLM-assisted planner, validation/fallback, deterministic
   query composer, evidence-sufficiency gate, and fingerprinted query-plan store.
 - Planner output must copy query spans/lexical terms, must not infer an outcome,
   and falls back safely on load, timeout, generation, JSON, schema, or grounding
@@ -198,27 +198,40 @@ Team rules:
 - Baseline and candidate use two primary structured queries. A third adaptive
   query is issued only when the first two results fail the evidence gate and
   per-case budget remains.
-- `case_retrieval.py` implements throttling, at most one retry, SQLite caching,
-  exact `chunk_id` de-duplication, global/per-case hard caps, and safe error
-  diagnostics.
+- `case_retrieval.py` implements throttling, at most one case-level retry,
+  SQLite caching, exact `chunk_id` de-duplication, global/per-case hard caps,
+  safe error diagnostics, and fail-soft handling for case-scoped request
+  failures.
 - `scripts/plan_api_calls.py` reports a structured upper-bound plan and
   cache hits/misses without contacting the API.
 - Every live runner requires `--max-network-calls`; cache-only never constructs the HTTP client and records zero network attempts.
 - The default hard cap is three network attempts per case. Semantic queries and
   retries share it; cache hits spend no attempt. A recreated client restores
   per-case counts from the SQLite ledger for the same run key.
+- The scheduler attempts Q1 and Q2 once before allocating any remaining
+  attempt. If a primary request has a retryable timeout, `429`, or `5xx`, the
+  remaining attempt retries that primary. Otherwise, evidence-gate failure may
+  allocate it to Q3. A query is skipped when no budget remains; cached or
+  partial evidence continues to law retrieval and prediction instead of
+  raising `ApiBudgetExceeded` for the case.
 - SQLite commits a successful response, its safe attempt ledger row, and a pending-backup marker atomically. With external backup configured, every attempt must be backed up successfully before the next request. A resumed live client repairs pending state before returning a cache hit or sending another request; restore preserves a newer local database while that marker is pending.
 - API responses are checkpointed into prepared contexts for resume. Query plans
   are separately persisted by a fingerprint containing `case_id`, the raw
   `case_query` SHA-256, configured planner strategy/model revision, planner
   prompt version, and composer version.
 - `chunk_id` is stored as a string and can carry opaque hashed values.
-- During retrieval, the runner emits safe `ALQAC_PROGRESS` events for cache hits/misses, HTTP request start/completion, HTTP errors, exceptions, and scheduled retries. Events include only `case_id`, query type, attempt metadata, status metadata, and latency; they never include the query text, response text, headers, or token.
+- During retrieval, the runner emits safe `ALQAC_PROGRESS` events for
+  cache hits/misses, HTTP request start/completion, HTTP errors, exceptions,
+  scheduled retries, classified query failures, and budget skips. Events
+  include only `case_id`, query type, attempt metadata, status metadata, and
+  latency; they never include query text, response text, headers, or token.
+  Internal API statistics retain only classified failure codes.
 
 ## Verification status
 
 Private input loading, opaque identifier storage/validation, structured
-fallback planning, adaptive-query gating, cache planning, hard budgets, retries,
-resume-safe per-case ledger counts, and safe logging are `CPU/mock verified`.
-The pinned planner and end-to-end retrieval path still lack a completed
-`GPU/API verified` artifact.
+fallback planning, adaptive-query gating, cache planning, hard budgets,
+budget-aware retry allocation, fail-soft case retrieval, resume-safe per-case
+ledger counts, and safe logging are `CPU/mock verified`. The pinned 8B planner
+and end-to-end retrieval path still lack a completed `GPU/API verified`
+artifact.

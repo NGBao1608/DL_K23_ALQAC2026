@@ -1,6 +1,7 @@
 import pytest
 
 import alqac2026.prediction as prediction_module
+from alqac2026.pipeline import ALQACPipeline, PreparedCase
 from alqac2026.prediction import (
     DECISION_FIRST_SYSTEM_PROMPT,
     OutcomePredictor,
@@ -208,3 +209,34 @@ def test_create_predictor_forwards_optional_adapter_without_loading_models(
     )
     assert captured["adapter_path"] == "/drive/adapter"
     assert predictor.system_prompt == DECISION_FIRST_SYSTEM_PROMPT
+
+
+def test_case_prediction_failure_uses_submission_safe_operative_fallback():
+    class FailingPredictor:
+        def predict(self, case, case_evidence, law_evidence):
+            raise ValueError("invalid model output")
+
+    prepared = PreparedCase(
+        case=InferenceCase("case_1", "Nguyên đơn yêu cầu trả nợ."),
+        case_evidence=[
+            CaseEvidence(
+                "opaque",
+                "Hội đồng xét xử quyết định không chấp nhận yêu cầu khởi kiện.",
+                1.0,
+                "operative_verdict",
+            )
+        ],
+        law_evidence=[],
+        api_calls=2,
+    )
+    pipeline = ALQACPipeline(
+        None,
+        None,
+        FailingPredictor(),
+        allow_prediction_fallback=True,
+        prediction_fallback_label=OutcomeLabel.PARTIAL_B_WIN,
+    )
+    result = pipeline.predict_prepared(prepared)
+    assert result.status == "completed"
+    assert result.prediction is OutcomeLabel.B_WIN
+    assert result.error == "PredictionFallback:ValueError"

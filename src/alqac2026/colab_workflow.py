@@ -226,6 +226,7 @@ def _run_stage(
         stage_dir=stage_dir,
         expected_cases=2 if stage == "smoke" else expected_cases,
         source_pin=source_pin,
+        allow_degraded=stage == "full",
     )
     if stage == "smoke":
         write_json(
@@ -314,6 +315,7 @@ def _validate_stage_result(
     stage_dir: Path,
     expected_cases: int,
     source_pin: dict[str, Any],
+    allow_degraded: bool = False,
 ) -> None:
     manifest = _read_json(stage_dir / "manifest.json")
     validation = _read_json(stage_dir / "validation.json")
@@ -322,6 +324,10 @@ def _validate_stage_result(
         or manifest.get("run", {}).get("completed") != expected_cases
         or validation.get("status") != "PASS"
         or validation.get("cases") != expected_cases
+        or (
+            not allow_degraded
+            and manifest.get("run", {}).get("degraded_cases", 0) != 0
+        )
     ):
         raise ValueError(f"Stage did not complete and validate: {stage_dir}")
     if manifest.get("git_commit") != source_pin.get("commit"):

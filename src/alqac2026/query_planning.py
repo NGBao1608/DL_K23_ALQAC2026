@@ -14,8 +14,8 @@ from .config import write_json
 from .schemas import CaseEvidence, InferenceCase
 
 
-PLANNER_PROMPT_VERSION = "structured-case-query-v1"
-COMPOSER_VERSION = "deterministic-query-composer-v1"
+PLANNER_PROMPT_VERSION = "structured-case-query-v2"
+COMPOSER_VERSION = "deterministic-query-composer-v2"
 
 
 def normalize_text(value: str) -> str:
@@ -47,6 +47,7 @@ class PlannerResult:
     plan: StructuredQueryPlan
     strategy: str
     failure_type: str | None = None
+    failure_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +77,22 @@ class QueryPlanner(Protocol):
     def plan(self, case_query: str) -> PlannerResult: ...
 
     def release(self) -> None: ...
+
+
+class PlannerOutputError(ValueError):
+    """A safely classifiable planner contract failure."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+class PlannerModelLoadError(RuntimeError):
+    pass
+
+
+class PlannerGenerationError(RuntimeError):
+    pass
 
 
 CASE_TYPE_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -176,8 +193,11 @@ class DeterministicQueryPlanner:
     @staticmethod
     def _extract_main_claim(query: str, remedies: tuple[str, ...]) -> str:
         patterns = (
-            r"(?:yêu cầu|đề nghị)(?:\s+Tòa án)?\s+([^,.;?\n]+)",
-            r"(tranh chấp\s+[^,.;?\n]+)",
+            (
+                r"(?:yêu cầu|đề nghị)(?:\s+Tòa án)?\s+"
+                r"(.+?)(?=,(?!\d)|;|\?|\.(?!\d)|\n|$)"
+            ),
+            r"(tranh chấp\s+.+?)(?=,(?!\d)|;|\?|\.(?!\d)|\n|$)",
         )
         for pattern in patterns:
             match = re.search(pattern, query, flags=re.IGNORECASE)
@@ -196,16 +216,31 @@ def _json_object(value: str) -> dict[str, Any]:
     start = value.find("{")
     end = value.rfind("}")
     if start < 0 or end < start:
-        raise ValueError("Planner output does not contain a JSON object")
-    parsed = json.loads(value[start : end + 1])
+        raise PlannerOutputError(
+            "missing_json_object",
+            "Planner output does not contain a JSON object",
+        )
+    try:
+        parsed = json.loads(value[start : end + 1])
+    except json.JSONDecodeError as error:
+        raise PlannerOutputError(
+            "invalid_json",
+            "Planner output contains invalid JSON",
+        ) from error
     if not isinstance(parsed, dict):
-        raise ValueError("Planner output must be a JSON object")
+        raise PlannerOutputError(
+            "invalid_json_object",
+            "Planner output must be a JSON object",
+        )
     return parsed
 
 
 def _string_tuple(value: Any, field: str) -> tuple[str, ...]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ValueError(f"Planner field {field} must be a list of strings")
+        raise PlannerOutputError(
+            "invalid_field_type",
+            f"Planner field {field} must be a list of strings",
+        )
     return tuple(
         dict.fromkeys(normalize_text(item) for item in value if normalize_text(item))
     )
@@ -221,11 +256,17 @@ def parse_query_plan(value: str) -> StructuredQueryPlan:
         "amounts_or_areas",
     }
     if set(parsed) != required:
-        raise ValueError("Planner JSON fields do not match the structured schema")
+        raise PlannerOutputError(
+            "schema_mismatch",
+            "Planner JSON fields do not match the structured schema",
+        )
     if not isinstance(parsed["case_type"], str) or not isinstance(
         parsed["main_claim"], str
     ):
-        raise ValueError("Planner case_type and main_claim must be strings")
+        raise PlannerOutputError(
+            "invalid_field_type",
+            "Planner case_type and main_claim must be strings",
+        )
     return StructuredQueryPlan(
         case_type=normalize_text(parsed["case_type"]),
         main_claim=normalize_text(parsed["main_claim"]),
@@ -247,12 +288,21 @@ def validate_query_plan(
 ) -> None:
     source = normalized_lookup(case_query)
     if not plan.main_claim:
-        raise ValueError("Planner output is missing main_claim")
+        raise PlannerOutputError(
+            "missing_main_claim",
+            "Planner output is missing main_claim",
+        )
     if plan.case_type not in {item[0] for item in CASE_TYPE_KEYWORDS} | {"other"}:
-        raise ValueError("Planner case_type is not an allowed canonical value")
+        raise PlannerOutputError(
+            "invalid_case_type",
+            "Planner case_type is not an allowed canonical value",
+        )
     detected = detect_case_type(case_query)
     if detected != "other" and plan.case_type != detected:
-        raise ValueError("Planner case_type is not supported by case_query")
+        raise PlannerOutputError(
+            "case_type_mismatch",
+            "Planner case_type is not supported by case_query",
+        )
     for value in (
         plan.main_claim,
         *plan.requested_remedies,
@@ -260,15 +310,24 @@ def validate_query_plan(
         *plan.amounts_or_areas,
     ):
         if normalized_lookup(value) not in source:
-            raise ValueError("Planner output contains text absent from case_query")
+            raise PlannerOutputError(
+                "ungrounded_span",
+                "Planner output contains text absent from case_query",
+            )
     if deterministic_reference is not None:
         if (
             deterministic_reference.requested_remedies
             and not plan.requested_remedies
         ):
-            raise ValueError("Planner output omitted required requested_remedies")
+            raise PlannerOutputError(
+                "missing_requested_remedy",
+                "Planner output omitted required requested_remedies",
+            )
         if deterministic_reference.legal_objects and not plan.legal_objects:
-            raise ValueError("Planner output omitted required legal_objects")
+            raise PlannerOutputError(
+                "missing_legal_object",
+                "Planner output omitted required legal_objects",
+            )
 
 
 SYSTEM_PROMPT = """You are a Vietnamese legal query planner.
@@ -277,7 +336,25 @@ legal_objects, amounts_or_areas. Use one canonical case_type from inheritance,
 land, loan, contract, compensation, marriage_family, labor, administrative,
 other. Copy exact spans or lexical terms from case_query for every other field.
 Do not infer the judgment, acceptance, rejection, winner, or outcome.
-Use arrays for the last three fields and no markdown."""
+Use arrays for the last three fields and no markdown. Deterministic hints are
+query-derived lexical candidates. Preserve useful hinted remedies, objects,
+amounts, and identifiers unless they are absent from case_query."""
+
+
+def _planner_failure_code(error: Exception) -> str:
+    if isinstance(error, PlannerOutputError):
+        return error.code
+    if isinstance(error, PlannerDeadlineExceeded):
+        return "generation_timeout"
+    if isinstance(error, PlannerModelLoadError):
+        return "model_load_failure"
+    if isinstance(error, PlannerGenerationError):
+        return "generation_failure"
+    if isinstance(error, (ImportError, OSError)):
+        return "model_load_failure"
+    if isinstance(error, TimeoutError):
+        return "generation_timeout"
+    return "runtime_failure"
 
 
 class LLMAssistedQueryPlanner:
@@ -292,9 +369,18 @@ class LLMAssistedQueryPlanner:
     def plan(self, case_query: str) -> PlannerResult:
         deterministic = self.fallback.plan(case_query).plan
         try:
+            hints = {
+                "case_type": deterministic.case_type,
+                "requested_remedies": list(deterministic.requested_remedies),
+                "legal_objects": list(deterministic.legal_objects),
+                "amounts_or_areas": list(deterministic.amounts_or_areas),
+            }
             raw = self.backend.generate(
                 SYSTEM_PROMPT,
-                "case_query:\n" + normalize_text(case_query),
+                "case_query:\n"
+                + normalize_text(case_query)
+                + "\n\ndeterministic_hints:\n"
+                + json.dumps(hints, ensure_ascii=False, sort_keys=True),
             )
             plan = parse_query_plan(raw)
             validate_query_plan(
@@ -308,6 +394,7 @@ class LLMAssistedQueryPlanner:
                 plan=deterministic,
                 strategy="deterministic_fallback",
                 failure_type=type(error).__name__,
+                failure_code=_planner_failure_code(error),
             )
 
     def release(self) -> None:
@@ -329,29 +416,67 @@ class TransformersPlannerBackend:
         revision: str,
         max_new_tokens: int = 256,
         timeout_seconds: float = 12.0,
+        load_in_4bit: bool = False,
     ):
         self.model_name = model_name
         self.revision = revision
         self.max_new_tokens = max_new_tokens
         self.timeout_seconds = timeout_seconds
+        self.load_in_4bit = load_in_4bit
         self.tokenizer = None
         self.model = None
+        self.load_failure: PlannerModelLoadError | None = None
 
     def _load(self) -> None:
         if self.model is not None:
             return
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        if self.load_failure is not None:
+            raise self.load_failure
+        try:
+            import torch
+            from transformers import (
+                AutoModelForCausalLM,
+                AutoTokenizer,
+                BitsAndBytesConfig,
+            )
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model_name,
-            revision=self.revision,
-        )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            revision=self.revision,
-            torch_dtype="auto",
-            device_map="auto",
-        ).eval()
+            quantization_config = None
+            torch_dtype: str | torch.dtype = "auto"
+            if self.load_in_4bit:
+                torch_dtype = torch.float16
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                )
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.model_name,
+                revision=self.revision,
+            )
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                revision=self.revision,
+                torch_dtype=torch_dtype,
+                quantization_config=quantization_config,
+                device_map="auto",
+                trust_remote_code=True,
+            ).eval()
+        except Exception as error:
+            self.model = None
+            self.tokenizer = None
+            gc.collect()
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            self.load_failure = PlannerModelLoadError(
+                "Query planner model could not be loaded"
+            )
+            raise self.load_failure from error
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         self._load()
@@ -380,13 +505,18 @@ class TransformersPlannerBackend:
             enable_thinking=False,
         )
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-        with torch.inference_mode():
-            output = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=False,
-                stopping_criteria=StoppingCriteriaList([stopper]),
-            )
+        try:
+            with torch.inference_mode():
+                output = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                    stopping_criteria=StoppingCriteriaList([stopper]),
+                )
+        except Exception as error:
+            raise PlannerGenerationError(
+                "Query planner generation failed"
+            ) from error
         if stopper.expired or time.monotonic() >= deadline:
             raise PlannerDeadlineExceeded(
                 f"Planner generation exceeded {self.timeout_seconds} seconds"
@@ -421,6 +551,7 @@ def create_query_planner(config: dict[str, Any]) -> QueryPlanner:
         revision=str(config["revision"]),
         max_new_tokens=int(config.get("max_new_tokens", 256)),
         timeout_seconds=float(config.get("timeout_seconds", 12.0)),
+        load_in_4bit=bool(config.get("load_in_4bit", False)),
     )
     return LLMAssistedQueryPlanner(backend, fallback=fallback)
 
@@ -630,6 +761,7 @@ class StoredQueryPlan:
     planner_failure_type: str | None
     plan: StructuredQueryPlan
     queries: tuple[PlannedQuery, ...]
+    planner_failure_code: str | None = None
 
 
 class QueryPlanStore:
@@ -683,6 +815,7 @@ class QueryPlanStore:
             },
             "planner_strategy": result.strategy,
             "planner_failure_type": result.failure_type,
+            "planner_failure_code": result.failure_code,
             "plan": result.plan.to_dict(),
             "queries": [asdict(query) for query in queries],
         }
@@ -704,6 +837,7 @@ class QueryPlanStore:
             fingerprint=str(record["fingerprint"]),
             planner_strategy=str(record["planner_strategy"]),
             planner_failure_type=record.get("planner_failure_type"),
+            planner_failure_code=record.get("planner_failure_code"),
             plan=plan,
             queries=tuple(PlannedQuery(**query) for query in record["queries"]),
         )

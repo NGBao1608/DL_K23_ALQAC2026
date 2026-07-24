@@ -165,6 +165,9 @@ This repository currently adopts stricter internal safeguards:
 - proprietary model APIs and prohibited externally annotated legal datasets are excluded;
 - secrets are read from environment or notebook secret storage;
 - API responses are cached and runs are checkpointed;
+- case-scoped retrieval/generation failures are recorded and degraded without
+  removing a case from the final format-valid output, while systemic safety
+  failures remain fail-fast;
 - submission validation is mandatory; and
 - leaderboard upload is always manual.
 

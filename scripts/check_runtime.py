@@ -72,11 +72,20 @@ def main() -> None:
         planner.release()
     if not planner_result.plan.main_claim:
         raise RuntimeError("Runtime planner and fallback did not produce main_claim")
+    if (
+        config["case_retrieval"]["query_planner"]["strategy"] == "llm_assisted"
+        and planner_result.strategy != "llm"
+    ):
+        raise RuntimeError(
+            "Runtime LLM query planner did not pass validation: "
+            f"{planner_result.failure_code or planner_result.failure_type}"
+        )
     report["stages"]["query_planner"] = {
         "status": "PASS",
         "seconds": round(time.perf_counter() - started, 3),
         "strategy": planner_result.strategy,
         "failure_type": planner_result.failure_type,
+        "failure_code": planner_result.failure_code,
     }
 
     law_config = dict(config["law_retrieval"])

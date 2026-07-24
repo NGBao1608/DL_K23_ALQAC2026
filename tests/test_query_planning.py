@@ -8,6 +8,7 @@ from alqac2026.query_planning import (
     LLMAssistedQueryPlanner,
     PlannerDeadlineExceeded,
     QueryPlanStore,
+    create_query_planner,
     evaluate_evidence_sufficiency,
 )
 from alqac2026.schemas import CaseEvidence, InferenceCase
@@ -68,6 +69,7 @@ def test_planner_runtime_failure_falls_back_deterministically(error):
     result = LLMAssistedQueryPlanner(FakeBackend(error=error)).plan(CASE_QUERY)
     assert result.strategy == "deterministic_fallback"
     assert result.failure_type == type(error).__name__
+    assert result.failure_code in {"generation_timeout", "model_load_failure"}
     assert result.plan.main_claim == "chia di sản thừa kế theo pháp luật"
 
 
@@ -101,12 +103,40 @@ def test_planner_runtime_failure_falls_back_deterministically(error):
 def test_invalid_missing_or_non_exact_llm_output_falls_back(output):
     result = LLMAssistedQueryPlanner(FakeBackend(output)).plan(CASE_QUERY)
     assert result.strategy == "deterministic_fallback"
-    assert result.failure_type in {"JSONDecodeError", "ValueError"}
+    assert result.failure_type == "PlannerOutputError"
+    assert result.failure_code in {
+        "missing_json_object",
+        "schema_mismatch",
+        "ungrounded_span",
+        "missing_requested_remedy",
+    }
 
 
 def test_deterministic_planner_same_input_same_output():
     planner = DeterministicQueryPlanner()
     assert planner.plan(CASE_QUERY) == planner.plan(CASE_QUERY)
+
+
+def test_deterministic_main_claim_preserves_grouped_money():
+    result = DeterministicQueryPlanner().plan(
+        "Nguyên đơn yêu cầu bị đơn hoàn trả 142.800.000 đồng."
+    )
+    assert result.plan.main_claim == "bị đơn hoàn trả 142.800.000 đồng"
+
+
+def test_qwen8_planner_configuration_enables_quantized_loading_without_model_load():
+    planner = create_query_planner(
+        {
+            "strategy": "llm_assisted",
+            "model_name": "Qwen/Qwen3-8B",
+            "revision": "revision",
+            "thinking": False,
+            "do_sample": False,
+            "load_in_4bit": True,
+        }
+    )
+    assert planner.backend.model_name == "Qwen/Qwen3-8B"
+    assert planner.backend.load_in_4bit is True
 
 
 def test_query_composer_is_concise_deduplicated_and_bounded():
@@ -145,6 +175,7 @@ def test_query_plan_artifact_reuses_same_fingerprint_without_regeneration(tmp_pa
         "composer_version",
     }
     assert len(components["case_query_sha256"]) == 64
+    assert artifact["case_1"]["planner_failure_code"] is None
 
 
 def test_evidence_gate_rejects_duplicate_or_party_role_evidence():

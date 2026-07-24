@@ -8,6 +8,7 @@ import pytest
 import alqac2026.colab_workflow as colab_workflow
 from alqac2026.colab_workflow import (
     _require_smoke_gate,
+    _validate_stage_result,
     _verify_existing_export,
     _validate_private_corpus,
     _validate_stage_inputs,
@@ -55,6 +56,36 @@ def test_full_requires_smoke_gate_on_same_commit_and_config(tmp_path):
         _require_smoke_gate(tmp_path, {"commit": "b" * 40}, "config-a")
     with pytest.raises(ValueError, match="pinned commit"):
         _require_smoke_gate(tmp_path, {"commit": "a" * 40}, "config-b")
+
+
+def test_smoke_rejects_degraded_cases_but_full_may_export_them(tmp_path):
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "git_commit": "a" * 40,
+                "run": {
+                    "status": "completed",
+                    "completed": 2,
+                    "degraded_cases": 1,
+                },
+            }
+        )
+    )
+    (tmp_path / "validation.json").write_text(
+        json.dumps({"status": "PASS", "cases": 2})
+    )
+    with pytest.raises(ValueError, match="did not complete"):
+        _validate_stage_result(
+            stage_dir=tmp_path,
+            expected_cases=2,
+            source_pin={"commit": "a" * 40},
+        )
+    _validate_stage_result(
+        stage_dir=tmp_path,
+        expected_cases=2,
+        source_pin={"commit": "a" * 40},
+        allow_degraded=True,
+    )
 
 
 def test_private_corpus_matches_reviewed_contract(tmp_path, monkeypatch):

@@ -3,6 +3,7 @@ import requests
 
 from alqac2026.case_retrieval import (
     ApiBudgetExceeded,
+    CaseApiRequestError,
     CachedCaseContentClient,
     CaseContentClient,
     CaseEvidenceRetriever,
@@ -267,7 +268,7 @@ def test_api_budget_caps_retry_attempts(tmp_path):
         sleep=lambda _: None,
         clock=lambda: 1.0,
     )
-    with pytest.raises(ApiBudgetExceeded, match="budget exhausted"):
+    with pytest.raises(CaseApiRequestError, match="server_error"):
         client.retrieve("case_1", "query", query_type="original")
     assert client.network_calls == 1
     assert len(session.calls) == 1
@@ -364,7 +365,7 @@ def test_timeout_is_counted_and_logged_without_secret(tmp_path):
         sleep=lambda _: None,
         clock=lambda: 1.0,
     )
-    with pytest.raises(requests.Timeout):
+    with pytest.raises(CaseApiRequestError, match="network_exception"):
         client.retrieve("case_1", "sensitive query", query_type="original")
     row = cache.connection.execute(
         "SELECT query_type, query_hash, exception_type FROM api_call_log"
@@ -430,7 +431,14 @@ class ScriptedRetrievalClient:
         self.network_calls = 0
         self.budget = budget
 
-    def retrieve(self, case_id, query, query_type="unknown"):
+    def retrieve(
+        self,
+        case_id,
+        query,
+        query_type="unknown",
+        *,
+        max_attempts=None,
+    ):
         self.network_calls += 1
         return next(self.responses)
 
@@ -545,6 +553,66 @@ def test_retry_and_semantic_queries_share_one_per_case_budget(tmp_path):
     assert cache.run_attempt_stats("run")["per_case"]["case_1"][
         "network_attempts"
     ] == 3
+    cache.close()
+
+
+def test_retry_exhaustion_degrades_case_and_resume_uses_partial_cache(tmp_path):
+    case = InferenceCase(
+        "case_1",
+        "Nguyên đơn yêu cầu chia di sản thừa kế là thửa đất 107.",
+    )
+    cache = SQLiteEvidenceCache(tmp_path / "cache.sqlite")
+    session = FakeSession(
+        [
+            FakeResponse(503, {}),
+            FakeResponse(
+                200,
+                {"results": [_hit("chunk-2", "Tòa án xác định thửa đất 107.")]},
+            ),
+            FakeResponse(503, {}),
+        ]
+    )
+    first = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=2,
+        max_network_calls=3,
+        max_network_attempts_per_case=3,
+        run_key="stable-run",
+        request_interval_seconds=0,
+        session=session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    evidence, calls = CaseEvidenceRetriever(
+        first, {case.case_id: _stored_plan(case)}
+    ).retrieve(case)
+    assert calls == 3
+    assert [item.chunk_id for item in evidence] == ["chunk-2"]
+    assert first.per_case_failure_codes["case_1"] == ["server_error"]
+
+    resumed_session = FakeSession([])
+    resumed = CaseContentClient(
+        token="test-token",
+        base_url="https://example.test",
+        cache=cache,
+        retries=2,
+        max_network_calls=3,
+        max_network_attempts_per_case=3,
+        run_key="stable-run",
+        request_interval_seconds=0,
+        session=resumed_session,
+        sleep=lambda _: None,
+        clock=lambda: 1.0,
+    )
+    resumed_evidence, resumed_calls = CaseEvidenceRetriever(
+        resumed, {case.case_id: _stored_plan(case)}
+    ).retrieve(case)
+    assert resumed_calls == 0
+    assert [item.chunk_id for item in resumed_evidence] == ["chunk-2"]
+    assert resumed_session.calls == []
+    assert resumed.per_case_failure_codes["case_1"] == ["budget_exhausted"]
     cache.close()
 
 

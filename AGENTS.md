@@ -59,6 +59,17 @@ Read only the relevant canonical documents:
 - The Case API hard cap is `planned_cases × max_network_attempts_per_case`.
   Retry attempts and semantic queries share the same per-case cap, which is
   restored from the SQLite ledger on resume.
+- Primary queries receive one attempt each before the remaining per-case
+  attempt is allocated to one retry or adaptive query 3. A case-scoped
+  timeout, `429`, `5xx`, malformed query, or exhausted per-case budget must
+  degrade to cached/partial case evidence rather than fail the whole run.
+  Authentication, cache-integrity, backup, and model-load failures remain
+  fail-fast.
+- The configured LLM planner is pinned `Qwen/Qwen3-8B` in NF4 4-bit mode and
+  runs in a separate stage. Planner fallback and prediction fallback counts
+  must be recorded in internal run artifacts. Smoke may not pass with a
+  degraded case; full may finish and validate a complete submission with
+  explicitly reported degraded cases for manual review.
 - The official submission limits conflict: the competition website says three submissions per day, while the leaderboard rules say 20 per team per 24 hours. Treat this as `Needs confirmation` and enforce the stricter team limit of at most three submissions in any 24-hour period.
 - Private Test permits at most three distinctly named runs in total; run names cannot be reused and the best run counts.
 

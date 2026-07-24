@@ -29,6 +29,12 @@ approval; low-level `cache-only` remains available for zero-call diagnostics.
 SQLite restores per-case counts on client recreation, and Colab keeps a local
 working database with fail-closed external backup.
 
+Q1 and Q2 each receive one attempt before the scheduler allocates the remaining
+attempt. A retryable primary failure consumes that reserve; otherwise Q3 may
+consume it after evidence-gate failure. Exhausted budget and classified
+case-scoped request failures continue with cached/partial evidence. This avoids
+an inline retry attempting a fourth request and aborting the run.
+
 Rejected alternatives:
 
 - repeating calls to reproduce an already cached result;
@@ -52,6 +58,8 @@ Retrieval models prepare contexts and are released before Qwen3 loads. Every ful
 **Status:** Accepted and aligned with current official restrictions
 
 - Outcome: pinned `Qwen/Qwen3-8B`, NF4 4-bit, FP16 compute, thinking disabled.
+- Query planner: the same pinned `Qwen/Qwen3-8B` revision in a separate NF4
+  4-bit stage, released before law retrieval.
 - Law retrieval baseline: BM25.
 - Law retrieval candidate: `AITeamVN/Vietnamese_Embedding` + BM25 + RRF + exact citation candidate expansion + `AITeamVN/Vietnamese_Reranker`.
 - Outcome candidate: decision-first prompt with larger case-evidence excerpts and the official `>50%` partial-label boundary.
@@ -153,9 +161,10 @@ consume shared operational capacity.
 
 **Status:** Accepted and `CPU/mock verified`
 
-The production planner first uses pinned open-weight `Qwen/Qwen3-0.6B` revision
-`c1899de289a04d12100db370d81485cdf75e47ca` with thinking off, deterministic
-generation, a 256-token output bound, and deadline-aware stopping. Output must
+The production planner first uses pinned open-weight `Qwen/Qwen3-8B` revision
+`b968826d9c46dd6066d109eabc6255188de91218` in NF4 4-bit mode with thinking off,
+deterministic generation, a 256-token output bound, and deadline-aware stopping.
+The prompt includes deterministic query-derived lexical hints. Output must
 match the structured schema, preserve query-grounded spans/terms, include
 required claim/remedy/object information, and avoid outcome inference.
 
@@ -163,7 +172,8 @@ Any load, timeout, generation, JSON, grounding, or runtime failure selects the
 deterministic structured planner and does not fail the case. The planner runs
 as a separate stage and releases GPU resources before law retrieval/outcome
 models. Query plans are persisted under a versioned fingerprint and excluded
-from safe logs, submissions, and exports.
+from safe logs, submissions, and exports. Classified failure codes are
+persisted without raw model output or query text.
 
 ## D-015: Public gold for offline training, never inference
 
@@ -179,3 +189,21 @@ with all augmentations of one `case_id` in one fold. Reporting training-set
 accuracy after fitting all 50 cases is rejected. After hyperparameters are
 locked from out-of-fold evidence, a final adapter may be trained on all Public
 cases and loaded only through the existing `adapter_path` interface.
+
+## D-016: Complete-case degradation policy
+
+**Status:** Accepted and `CPU/mock verified`
+
+Case-scoped retrieval failures (`timeout`, `429`, `5xx`, malformed query, or
+exhausted approved budget) must not abort later cases. The pipeline continues
+with cached/partial case evidence and law evidence. After normal outcome
+generation, repair, and verification fail for one case, a deterministic
+operative-language fallback supplies a valid label; the default without
+trustworthy operative scope is `B_WIN`.
+
+Every fallback remains visible through safe internal case status, API stats,
+manifest, and validation counts. Smoke rejects any degraded case. Full may
+finish all cases and create a format-valid submission with degraded counts for
+manual review. Token/authentication, model-load, cache-integrity, and external
+backup failures remain fail-fast because continuing would be unsafe or
+systemically invalid.

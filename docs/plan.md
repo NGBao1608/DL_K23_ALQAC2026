@@ -32,7 +32,7 @@ Official requirements and open questions are tracked in `docs/competition.md`. N
 | Task name | Purpose | Related files/modules | Expected output | Current status |
 |---|---|---|---|---|
 | Compare BM25 and hybrid retrieval | Measure whether dense retrieval, citation expansion, and reranking improve law evidence | Law retriever, comparison script | Same-input Recall@5/10, Micro Law F1, runtime comparison | Not implemented yet |
-| Optimize query allocation | Improve case recall without wasting permanent API calls | Structured planner, evidence gate, cached evidence registry | Two primary queries, adaptive query 3 only on gate failure, shared retry budget | CPU/mock verified |
+| Optimize query allocation | Improve case recall without wasting permanent API calls | Structured planner, evidence gate, cached evidence registry | Primary-first scheduler, adaptive query 3 only on gate failure, one shared retry, fail-soft case completion | CPU/mock verified |
 | Analyze outcome errors | Reduce confusion among four outcome labels | Public metrics/errors artifacts | Label confusion and case-level error categories | Not implemented yet |
 | Tune outcome prompt safely | Improve accuracy without data leakage | Predictor/config | Baseline versus `decision_first_v2` comparison on private-like Public input | Not implemented yet |
 | Build Public-gold adapter training workflow | Improve four-label calibration after retrieval | Training notebook/module, `adapter_path`, experiment registry | Production-equivalent inputs, case-grouped stratified five-fold OOF metrics, final locked adapter | Not implemented yet |
