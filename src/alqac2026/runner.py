@@ -102,6 +102,7 @@ def run_experiment(
     selection_profile: str | Path | None = None,
     adapter_path: str | Path | None = None,
     query_plan_store_path: str | Path | None = None,
+    corpus_path: str | Path | None = None,
 ) -> dict:
     config = load_config(config_path)
     mode = execution_mode or ("mock" if mock else "live")
@@ -112,6 +113,8 @@ def run_experiment(
     mock = mode == "mock"
     if cache_db is not None:
         config["paths"]["cache_db"] = str(Path(cache_db))
+    if corpus_path is not None:
+        config["paths"]["corpus"] = str(Path(corpus_path))
     if law_index_dir is not None:
         config["paths"]["law_index"] = str(Path(law_index_dir))
     if adapter_path is not None:
@@ -550,6 +553,8 @@ def run_experiment(
                     {
                         "prediction_attempts": result.prediction_attempts,
                         "prediction_failure_types": result.prediction_failure_types,
+                        "output_repair_used": result.output_repair_used,
+                        "output_verification": result.output_verification,
                         "prediction_recovered": (
                             result.prediction_attempts > 1
                             and result.status == "completed"
@@ -567,6 +572,8 @@ def run_experiment(
                     "api_calls": result.api_calls,
                     "latency_seconds": round(result.latency_seconds, 3),
                     "prediction_attempts": result.prediction_attempts,
+                    "output_repair_used": result.output_repair_used,
+                    "output_verification": result.output_verification,
                     "prediction_recovered": (
                         result.prediction_attempts > 1
                         and result.status == "completed"
@@ -677,6 +684,19 @@ def run_experiment(
         total_prediction_attempts = sum(
             result.prediction_attempts for result in results
         )
+        output_repair_case_ids = {
+            result.case_id for result in results if result.output_repair_used
+        }
+        verification_failed_case_ids = {
+            result.case_id
+            for result in results
+            if result.output_verification == "failed"
+        }
+        verification_passed_case_ids = {
+            result.case_id
+            for result in results
+            if result.output_verification == "passed"
+        }
         retrieval_degraded_case_ids = {
             case.case_id
             for case in cases
@@ -694,7 +714,11 @@ def run_experiment(
         # Planner fallback is the designed recovery path for a case-scoped
         # planner timeout/load/generation/validation failure. Keep it visible,
         # but reserve degradation for unresolved retrieval or prediction.
-        degraded_case_ids = fallback_case_ids | retrieval_degraded_case_ids
+        degraded_case_ids = (
+            fallback_case_ids
+            | retrieval_degraded_case_ids
+            | verification_failed_case_ids
+        )
         validation.update(
             {
                 "degraded_cases": len(degraded_case_ids),
@@ -704,6 +728,13 @@ def run_experiment(
                 "prediction_retry_cases": len(prediction_retry_case_ids),
                 "recovered_prediction_cases": len(prediction_recovered_case_ids),
                 "prediction_attempts": total_prediction_attempts,
+                "output_repair_cases": len(output_repair_case_ids),
+                "output_verification_passed_cases": len(
+                    verification_passed_case_ids
+                ),
+                "output_verification_failed_cases": len(
+                    verification_failed_case_ids
+                ),
             }
         )
         write_json(run_dir / "validation.json", validation)
@@ -720,6 +751,13 @@ def run_experiment(
                 "prediction_retry_cases": len(prediction_retry_case_ids),
                 "recovered_prediction_cases": len(prediction_recovered_case_ids),
                 "prediction_attempts": total_prediction_attempts,
+                "output_repair_cases": len(output_repair_case_ids),
+                "output_verification_passed_cases": len(
+                    verification_passed_case_ids
+                ),
+                "output_verification_failed_cases": len(
+                    verification_failed_case_ids
+                ),
             }
         )
         write_json(

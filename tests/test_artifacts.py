@@ -176,10 +176,26 @@ def test_restore_hf_snapshots_skips_duplicate_blobs(tmp_path):
         "models": 1,
         "files": 2,
         "bytes": 13,
+        "reused_files": 0,
+        "reused_bytes": 0,
     }
     assert (restored_model / "snapshots" / ("a" * 40) / "config.json").is_file()
     assert (restored_model / "refs/main").read_text() == "a" * 40
     assert not (restored_model / "blobs").exists()
+
+    second_report = restore_hf_model_snapshots(
+        drive_cache,
+        local_cache,
+        reserve_bytes=0,
+    )
+    assert second_report == {
+        "restored": False,
+        "models": 1,
+        "files": 0,
+        "bytes": 0,
+        "reused_files": 2,
+        "reused_bytes": 13,
+    }
 
 
 def test_restore_hf_snapshots_is_optional_when_drive_cache_is_absent(tmp_path):
@@ -191,4 +207,6 @@ def test_restore_hf_snapshots_is_optional_when_drive_cache_is_absent(tmp_path):
         "models": 0,
         "files": 0,
         "bytes": 0,
+        "reused_files": 0,
+        "reused_bytes": 0,
     }

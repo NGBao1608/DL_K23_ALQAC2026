@@ -192,10 +192,17 @@ The current predictor uses pinned `Qwen/Qwen3-8B` with NF4 4-bit quantization,
 FP16 compute, double quantization, deterministic generation, thinking disabled,
 SDPA attention, and an offloaded KV cache for the candidate T4 profile.
 
-The candidate uses the `decision_first_v2` prompt. It identifies the plaintiff's main claim, prioritizes `Tuyên xử`/`Quyết định` evidence, separates procedural or independent claims, and estimates the accepted proportion before selecting a label. Its `>50%` boundary for `PARTIAL_A_WIN` versus `PARTIAL_B_WIN` now matches the official competition definition.
+The production candidate used the `decision_first_v2` prompt. The cache-only
+rescore candidate uses `decision_first_v3`, which preserves the same decision
+logic while requiring immediate one-line JSON and reasoning of at most 20
+words. Both identify the plaintiff's main claim, prioritize
+`Tuyên xử`/`Quyết định` evidence, separate procedural or independent claims,
+and apply the official `>50%` partial-label boundary.
 
-Candidate input context is tokenizer-aware with a 4,096-token input cap and a
-192-token output cap. System instructions, `case_query`, and the final JSON
+Candidate input context is tokenizer-aware with a 4,096-token input cap. The
+source-pinned Private v2 run used a 192-token output cap; the rescore profile
+uses 320 tokens after the artifact audit found malformed initial output in
+59/60 cases. System instructions, `case_query`, and the final JSON
 instruction are protected; remaining context is allocated approximately 65% to
 prioritized case evidence and 35% to the first three laws, with unused space
 reallocated. Retrieval still checkpoints ten law results, so this prompt-only
@@ -216,8 +223,9 @@ The model must emit:
 The parser validates JSON, ratio range, and the official `>50%` boundary.
 Numeric ratios deterministically normalize inconsistent labels. Partial or
 inconsistent results receive one deterministic verifier pass; a malformed
-first output receives one repair. These operations belong to one case-level
-prediction attempt.
+first output receives one repair. Repair reuses the complete original
+case/evidence prompt, not the malformed output as a detached factual input.
+These operations belong to one case-level prediction attempt.
 
 If that attempt still raises an exception, the prediction stage performs
 garbage collection, clears the CUDA cache, and repeats prediction against the
@@ -236,13 +244,15 @@ This produces a complete format-valid result while recording
 `PredictionFallback:<error type>` internally. Model-load failure remains
 fail-fast. `adapter_path` optionally loads an approved PEFT adapter.
 
-Prediction checkpoints preserve `prediction_attempts` and safe
-`prediction_failure_types`. Manifest/validation artifacts report
+Prediction checkpoints preserve `prediction_attempts`, safe
+`prediction_failure_types`, `output_repair_used`, and verifier status.
+Manifest/validation artifacts report
 `prediction_retry_cases`, `recovered_prediction_cases`, and the total
-`prediction_attempts`. `ALQAC_PROGRESS` emits `prediction/retry_scheduled` with
+`prediction_attempts`, plus repair and verifier pass/fail counts.
+`ALQAC_PROGRESS` emits `prediction/retry_scheduled` with
 only attempt numbers and the exception type. A retry-recovered case is not
 degraded; a deterministic prediction fallback remains degraded and blocks
-smoke. Repeating a
+smoke. A verifier failure is also degraded and blocks smoke. Repeating a
 deterministic prompt may reproduce a persistent malformed output, so bounded
 re-prediction primarily protects against transient runtime/generation failure.
 
@@ -257,14 +267,15 @@ notebook is `Not implemented yet`.
 A successful deterministic planner fallback is the designed recovery path for
 an LLM planner load, timeout, generation, JSON, or grounding failure. It remains
 visible through `planner_fallbacks` but does not increment `degraded_cases`.
-Smoke rejects unresolved retrieval failures and prediction fallbacks. Full
+Smoke rejects unresolved retrieval failures, prediction fallbacks, and output
+verifier failures. Full
 records `degraded_cases`, `planner_fallbacks`, and `fallback_predictions` in its
 manifest and validation artifacts, together with retry/recovery counts, so a
 complete submission can be reviewed before manual upload.
 
-Status: fallback completion and the memory-safe/OOM-compact policy are
-`CPU/mock verified`; the model path is not yet supported by a clean recorded
-`GPU/API verified` run.
+Status: the Private memory-safe/OOM-compact policy is `GPU/API verified` by the
+60-case Private v2 artifact. The evidence-grounded v3 repair/rescore path is
+`CPU/mock verified` and still requires Public GPU evaluation.
 
 The pinned Qwen3-8B, Vietnamese Embedding, and Vietnamese Reranker revisions are public, ungated, Apache-2.0, and each below the official 10-billion-parameter limit according to their Hugging Face metadata checked on 2026-07-20. The production pipeline loads these weights locally, does not call a proprietary model API, and must not use externally annotated legal QA or legal entailment datasets.
 
@@ -318,6 +329,13 @@ Smoke/full differ only by case count, stage directory, case-count-derived
 network cap, and gate state. Their shared query-plan store and SQLite cache
 reuse overlapping smoke work.
 
+`scripts/rescore_prepared.py` provides a stricter outcome-only path. It first
+proves that every selected input case has an exact matching `PreparedCase`,
+copies that immutable checkpoint to a new run directory, and calls the runner
+with `execution_mode=cache-only` and `max_network_calls=0`. Because no case
+requires preparation, no planner, Case API client, HTTP request, or API token
+is used. Public gold may be loaded only after prediction for evaluation.
+
 Successful API responses and prepared contexts are reused during resume. Run
 identity includes input, config, execution mode, limit, storage paths,
 selection profile, and source fingerprint. The Drive-first Colab notebook
@@ -345,6 +363,7 @@ Notebook logic remains thin; reusable behavior belongs in `src/alqac2026`.
 | `law_retrieval.py` | BM25, embedding retrieval, RRF, and reranking |
 | `prediction.py` | Token-aware Qwen context, structured parser, verifier, repair, and optional adapter |
 | `pipeline.py` | Context preparation and prediction orchestration |
+| `rescore.py` | Complete-context, zero-HTTP outcome rescore orchestration |
 | `evaluation.py` | Public outcome/law metrics and error analysis |
 | `submission.py` | Official output builder and local validation |
 | `runner.py` | Staged execution, checkpointing, resume, and artifacts |

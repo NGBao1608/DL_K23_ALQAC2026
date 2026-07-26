@@ -1,0 +1,70 @@
+run:
+  name: qwen3_cached_rescore_decision_v3
+  seed: 42
+
+paths:
+  corpus: data/raw/corpus_law_pub.json
+  public_test: data/raw/ALQAC2026_public_test.json
+  private_test: data/raw/ALQAC_private_test.json
+  cache_db: cache/case_api.sqlite
+  law_index: cache/law_index
+  output_dir: outputs
+
+case_retrieval:
+  api_base: https://alqac-api.ngrok.pro
+  primary_queries: 2
+  max_logical_queries_per_case: 3
+  max_network_attempts_per_case: 3
+  max_retries: 1
+  request_interval_seconds: 5.0
+  timeout_seconds: 30
+  composer_version: deterministic-query-composer-v2
+  query_planner:
+    strategy: llm_assisted
+    model_name: Qwen/Qwen3-8B
+    revision: b968826d9c46dd6066d109eabc6255188de91218
+    prompt_version: structured-case-query-v2
+    load_in_4bit: true
+    thinking: false
+    do_sample: false
+    max_new_tokens: 256
+    timeout_seconds: 12
+
+law_retrieval:
+  strategy: hybrid_rerank
+  embedding_model: AITeamVN/Vietnamese_Embedding
+  embedding_revision: dea33aa1ab339f38d66ae0a40e6c40e0a9249568
+  reranker_model: AITeamVN/Vietnamese_Reranker
+  reranker_revision: f536976248403314225d7fdfdbc87f0e9516a54e
+  sparse_k: 50
+  dense_k: 50
+  candidate_k: 30
+  top_k: 5
+  retrieval_k: 10
+  submission_top_k: 5
+  rrf_k: 60
+  batch_size: 4
+  citation_k: 12
+
+prediction:
+  model_name: Qwen/Qwen3-8B
+  revision: b968826d9c46dd6066d109eabc6255188de91218
+  load_in_4bit: true
+  max_input_tokens: 4096
+  max_new_tokens: 320
+  oom_max_input_tokens: 3072
+  oom_max_new_tokens: 256
+  attn_implementation: sdpa
+  cache_implementation: offloaded
+  thinking: false
+  adapter_path: null
+  allow_case_fallback: true
+  max_case_retries: 3
+  max_oom_retries: 1
+  fallback_label: B_WIN
+  context_law_top_k: 3
+  oom_context_law_top_k: 2
+  verification_reserve_tokens: 512
+  prompt_variant: decision_first_v3
+  case_evidence_chars: 2200
+  law_evidence_chars: 1200

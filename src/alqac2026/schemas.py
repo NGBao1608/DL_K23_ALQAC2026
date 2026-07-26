@@ -68,3 +68,5 @@ class PredictionResult:
     error: str | None = None
     prediction_attempts: int = 1
     prediction_failure_types: list[str] = field(default_factory=list)
+    output_repair_used: bool = False
+    output_verification: str = "not_required"

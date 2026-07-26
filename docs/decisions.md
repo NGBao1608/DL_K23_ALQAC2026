@@ -145,6 +145,11 @@ Public full run's selected law top-k scalar, but never reads Public gold.
 Private input and corpus are loaded from the source-pinned private checkout.
 Colab restores Drive model snapshots to local storage without copying duplicate
 Hugging Face blob objects.
+When smoke and full run in the same Colab runtime, the notebooks reuse an exact,
+clean source-pinned checkout and a dependency-install fingerprint. Snapshot
+restore copies only missing or size-mismatched files. Any commit, remote, or
+dirty-state mismatch still triggers a clean clone. This optimization does not
+relax source pinning or the separate smoke/full artifact directories.
 Successful live responses, the attempt ledger, and pending-backup state share
 one transaction; a resumed client repairs pending backup before any cache hit or
 request. Validation and manifest bind the exact submission hash and byte length
@@ -202,10 +207,11 @@ cases and loaded only through the existing `adapter_path` interface.
 
 Case-scoped retrieval failures (`timeout`, `429`, `5xx`, malformed query, or
 exhausted approved budget) must not abort later cases. The pipeline continues
-with cached/partial case evidence and law evidence. After normal outcome
-generation, repair, and verification fail for one case, a deterministic
-operative-language fallback supplies a valid label; the default without
-trustworthy operative scope is `B_WIN`.
+with cached/partial case evidence and law evidence. When bounded outcome
+generation/repair raises an exception, a deterministic operative-language
+fallback supplies a valid label; the default without trustworthy operative
+scope is `B_WIN`. A verifier failure retains the already parsed label but marks
+the case degraded for mandatory review and blocks smoke.
 
 Every fallback remains visible through safe internal case status, API stats,
 manifest, and validation counts. Smoke rejects any degraded case. Full may
@@ -218,9 +224,9 @@ A transient timeout, `429`, or `5xx` is not a degraded case when the bounded
 retry for the same logical query succeeds. It is recorded separately as a
 recovered retrieval error. A deterministic planner fallback is also a designed
 recovery path: it remains counted under `planner_fallbacks` but does not
-contribute to `degraded_cases`. Only an unresolved retrieval failure or
-prediction fallback contributes to `degraded_cases` and can fail the smoke
-gate.
+contribute to `degraded_cases`. An unresolved retrieval failure, prediction
+fallback, or output-verifier failure contributes to `degraded_cases` and can
+fail the smoke gate.
 
 ## D-017: Bounded prepared-context re-prediction
 
@@ -242,7 +248,7 @@ resolved configuration.
 
 ## D-018: Memory-safe Private Qwen3-8B profile
 
-**Status:** Accepted and `CPU/mock verified`
+**Status:** Accepted and `GPU/API verified`
 
 Private outcome inference retains the pinned NF4 4-bit Qwen3-8B rather than
 switching to an unmeasured 4B model. The candidate uses SDPA, offloaded KV
@@ -253,11 +259,12 @@ selection profile.
 
 The first CUDA OOM activates a 3,072-token, 160-output-token, two-law profile
 against the exact same `PreparedCase`. A second OOM falls back immediately.
-Repeating the original allocation two additional times was rejected because a
-`public-candidate-v7` progress excerpt showed deterministic OOM repetition on
-Colab T4. This observation is diagnostic only until the complete run artifact
-is reviewed. A clean Private smoke on the pinned commit/config remains
-mandatory before full.
+Repeating the original allocation two additional times was rejected because
+the complete `public-candidate-v7` artifact recorded 76 OOM exceptions and 19
+fallback cases. The source-pinned `private-candidate-v2` full artifact then
+completed all 60 cases on Colab T4 with zero OOM, zero compact retry, and zero
+prediction fallback. The memory profile is therefore GPU-verified; it does not
+by itself establish prediction quality.
 
 ## D-019: Fail-safe runtime-gate diagnostics
 
@@ -275,3 +282,29 @@ under D-014 rather than a fatal runtime failure. Embedding, reranker, required
 outcome model-load, and validated generation failures remain fail-fast. Because
 `private-candidate-v1` is already source-pinned, this replacement starts with
 the unused `private-candidate-v2` run identity.
+
+## D-020: Evidence-grounded cached outcome rescore
+
+**Status:** Accepted and `CPU/mock verified`
+
+`private-candidate-v2` completed without OOM, but 59 of 60 initial outcome
+generations were malformed. The former JSON repair saw only the malformed model
+text, not the original case/evidence prompt. Its 56 partial-label verifier calls
+also failed without degrading the case. This made completed-case status an
+insufficient quality signal.
+
+The `decision_first_v3` profile requires immediate compact JSON, uses 320 normal
+and 256 compact output tokens, and retains the proven 4,096/3,072 input,
+SDPA/offloaded-cache, and three/two-law limits. Repair now reuses the exact
+original production prompt and does not feed the malformed output back as its
+source of facts. Checkpoints, case status, manifest, and validation record
+`output_repair_used` and verifier pass/fail. Verifier failure is degraded and
+therefore blocks smoke.
+
+`scripts/rescore_prepared.py` accepts only a complete, input-matching
+`contexts.checkpoint.json`, copies it into a new run directory, forces
+`cache-only` with a zero network cap, and does not require or read the Case API
+token. Public prepared contexts must validate outcome quality before the same
+locked profile may rescore Private prepared contexts under a new `RUN_ID`.
+Changing the Private planner/retrieval policy remains out of scope without
+separate Public evidence and explicit live-API approval.

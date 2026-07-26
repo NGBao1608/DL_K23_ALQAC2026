@@ -99,7 +99,7 @@ def restore_hf_model_snapshots(
     *,
     reserve_bytes: int = MODEL_CACHE_RESERVE_BYTES,
 ) -> dict[str, int | bool]:
-    """Restore reusable Hugging Face snapshots without duplicate blob storage."""
+    """Restore missing Hugging Face snapshot files without recopying warm caches."""
     source_hub = Path(drive_cache) / "hub"
     target_hub = Path(local_cache) / "hub"
     if not source_hub.is_dir():
@@ -108,6 +108,8 @@ def restore_hf_model_snapshots(
             "models": 0,
             "files": 0,
             "bytes": 0,
+            "reused_files": 0,
+            "reused_bytes": 0,
         }
 
     snapshot_roots = []
@@ -115,13 +117,22 @@ def restore_hf_model_snapshots(
         snapshots = model_dir / "snapshots"
         if snapshots.is_dir():
             snapshot_roots.append((model_dir, snapshots))
-    files = [
-        path
-        for _, snapshots in snapshot_roots
-        for path in snapshots.rglob("*")
-        if path.is_file()
-    ]
-    required_bytes = sum(path.stat().st_size for path in files)
+    files_to_copy: list[tuple[Path, Path]] = []
+    reused_files = 0
+    reused_bytes = 0
+    for model_dir, snapshots in snapshot_roots:
+        target_snapshots = target_hub / model_dir.name / "snapshots"
+        for source_file in snapshots.rglob("*"):
+            if not source_file.is_file():
+                continue
+            target_file = target_snapshots / source_file.relative_to(snapshots)
+            source_size = source_file.stat().st_size
+            if target_file.is_file() and target_file.stat().st_size == source_size:
+                reused_files += 1
+                reused_bytes += source_size
+            else:
+                files_to_copy.append((source_file, target_file))
+    required_bytes = sum(source.stat().st_size for source, _ in files_to_copy)
     target_hub.mkdir(parents=True, exist_ok=True)
     free_bytes = shutil.disk_usage(target_hub).free
     if free_bytes < required_bytes + reserve_bytes:
@@ -132,7 +143,7 @@ def restore_hf_model_snapshots(
 
     for model_dir, _ in snapshot_roots:
         target_model = target_hub / model_dir.name
-        for child_name in ("snapshots", "refs", ".no_exist"):
+        for child_name in ("refs", ".no_exist"):
             source_child = model_dir / child_name
             if source_child.exists():
                 shutil.copytree(
@@ -140,11 +151,16 @@ def restore_hf_model_snapshots(
                     target_model / child_name,
                     dirs_exist_ok=True,
                 )
+    for source_file, target_file in files_to_copy:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_file, target_file)
     return {
-        "restored": bool(snapshot_roots),
+        "restored": bool(files_to_copy),
         "models": len(snapshot_roots),
-        "files": len(files),
+        "files": len(files_to_copy),
         "bytes": required_bytes,
+        "reused_files": reused_files,
+        "reused_bytes": reused_bytes,
     }
 
 

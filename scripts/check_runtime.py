@@ -148,12 +148,16 @@ def main() -> None:
             backend.release()
     if prediction_result.status != "completed" or not prediction_result.reasoning:
         raise ValueError("Runtime prediction did not return validated reasoning")
+    if prediction_result.output_verification == "failed":
+        raise ValueError("Runtime prediction verifier failed")
     report["stages"]["generation"] = {
         "status": "PASS",
         "seconds": round(time.perf_counter() - started, 3),
         "label": prediction_result.prediction.value,
         "prediction_attempts": prediction_result.prediction_attempts,
         "prediction_failure_types": prediction_result.prediction_failure_types,
+        "output_repair_used": prediction_result.output_repair_used,
+        "output_verification": prediction_result.output_verification,
     }
     report["status"] = "PASS"
     report["current_stage"] = None

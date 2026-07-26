@@ -65,6 +65,10 @@ class CheckpointStore:
                 str(value)
                 for value in record.get("prediction_failure_types", [])
             ],
+            output_repair_used=bool(record.get("output_repair_used", False)),
+            output_verification=str(
+                record.get("output_verification", "not_required")
+            ),
         )
 
 
@@ -149,6 +153,7 @@ class ALQACPipeline:
                 label, reasoning, raw = self.predictor.predict(
                     prepared.case, prepared.case_evidence, prepared.law_evidence
                 )
+                diagnostics = getattr(self.predictor, "last_diagnostics", None)
                 return PredictionResult(
                     case_id=prepared.case.case_id,
                     prediction=label,
@@ -160,6 +165,16 @@ class ALQACPipeline:
                     latency_seconds=time.perf_counter() - started,
                     prediction_attempts=attempt_index + 1,
                     prediction_failure_types=failure_types,
+                    output_repair_used=bool(
+                        getattr(diagnostics, "output_repair_used", False)
+                    ),
+                    output_verification=str(
+                        getattr(
+                            diagnostics,
+                            "output_verification",
+                            "not_required",
+                        )
+                    ),
                 )
             except Exception as error:
                 failure = (

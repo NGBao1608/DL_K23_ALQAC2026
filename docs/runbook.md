@@ -100,6 +100,14 @@ checkpoints are never promoted into the full prediction set; the shared query
 plans, evidence cache, and law index are reused. Create a new `RUN_ID` to adopt
 newer source code or a different workflow configuration.
 
+On a same-runtime smoke-to-full transition, Run all now reuses the checkout
+only when its remote, exact pinned commit, and clean status all match. It also
+reuses a dependency bootstrap fingerprint and skips already materialized model
+snapshot files. A mismatch falls back to a clean clone/install path. The exact
+previous failure cause is `Needs confirmation` until its traceback is retained,
+but changing only `STAGE` from `smoke` to `full` no longer deliberately deletes
+the warm pinned checkout or recopies the whole model cache.
+
 If the zero-API subprocess fails, inspect `<run-root>/runtime_check.json`. The
 wrapper reports its `failed_stage` and `error_type`; no Case Content API budget
 has been consumed at this point. The source-pinned `private-candidate-v1`
@@ -167,7 +175,40 @@ Run:
 Private has no local outcome or evidence labels, so the notebook does not run
 the Public evaluator. It exports only the complete validated full submission.
 
-## 6. Manual leaderboard submission
+## 6. Cache-only outcome rescore
+
+Always evaluate the new outcome profile on Public prepared contexts first:
+
+```bash
+python scripts/rescore_prepared.py \
+  --config configs/candidate_rescore_v1.yaml \
+  --input data/raw/ALQAC2026_public_test.json \
+  --public-gold data/raw/ALQAC2026_public_test.json \
+  --prepared-contexts /content/drive/MyDrive/ALQAC2026/runs/public/public-candidate-v7/full/contexts.checkpoint.json \
+  --run-dir /content/drive/MyDrive/ALQAC2026/runs/public/public-rescore-v1/full
+```
+
+Require all 50 cases, `validation=PASS`, zero network attempts, no verifier
+failure, a complete confusion matrix, and a measurable improvement over Public
+v7 before Private rescore. Then use a new Private `RUN_ID` and the immutable
+Private contexts:
+
+```bash
+python scripts/rescore_prepared.py \
+  --config configs/candidate_rescore_v1.yaml \
+  --input data/raw/ALQAC_private_test.json \
+  --corpus data/raw/private_test_60_cases_extracted_corpus.json \
+  --selection-profile /content/drive/MyDrive/ALQAC2026/runs/public/public-candidate-v7/full/selection_profile.json \
+  --prepared-contexts /content/drive/MyDrive/ALQAC2026/runs/private/private-candidate-v2/full/contexts.checkpoint.json \
+  --run-dir /content/drive/MyDrive/ALQAC2026/runs/private/private-rescore-v1/full
+```
+
+This command refuses incomplete or mismatched prepared contexts, uses a
+run-local empty SQLite database only for runner bookkeeping, fixes the network
+cap at zero, and does not require the Case API token. Do not overwrite
+`private-candidate-v2`; do not upload automatically.
+
+## 7. Manual leaderboard submission
 
 1. Confirm the candidate is a full completed production run, not mock or limited smoke output.
 2. Confirm validation passes under the refreshed rules.
@@ -180,7 +221,7 @@ the Public evaluator. It exports only the complete validated full submission.
 
 The Public leaderboard displays the best run per team. Private rankings are hidden publicly, the team can see its own score on the Submit page, and the best of at most three Private runs counts. Source code must never upload automatically.
 
-## 7. Source bundle
+## 8. Source bundle
 
 ```bash
 pytest
@@ -203,8 +244,8 @@ The official competition website encourages a short technical report and says or
 | `429` | Wait at least five seconds and use bounded backoff. |
 | `503` | Use bounded exponential retry and resume. |
 | CUDA OOM during retrieval | Reduce reranker batch size and release retrieval models before Qwen. |
-| CUDA OOM during Qwen | Restart into a clean T4 runtime and resume the same pinned run. Candidate generation uses offloaded KV cache at 4,096/192 tokens; the first OOM retries once with 3,072/160 tokens and two laws, while a second OOM records deterministic fallback. |
-| Invalid model output | Allow one repair attempt; do not invent a fallback label. |
+| CUDA OOM during Qwen | Resume the same pinned run. Private v2 verified the offloaded-cache 4,096-token profile over 60 cases; candidate rescore uses 320 output tokens and one 3,072/256 compact retry with two laws before fallback. |
+| Invalid model output | Allow one evidence-grounded repair. Inspect `output_repair_used` and `output_verification`; verifier failure is degraded and blocks smoke. |
 | Resume identity mismatch | Use the original source/config/input or start a new run directory. |
 | Git clone command contains `[https://...](https://...)` | Use a raw GitHub URL. Current notebooks normalize this accidental Markdown wrapper before clone. |
 | Validator rejects a non-empty exact API ID | Do not upload; preserve the artifact and investigate the validator/API schema conflict. |

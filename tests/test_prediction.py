@@ -3,6 +3,7 @@ import pytest
 import alqac2026.prediction as prediction_module
 from alqac2026.pipeline import ALQACPipeline, CheckpointStore, PreparedCase
 from alqac2026.prediction import (
+    DECISION_FIRST_COMPACT_SYSTEM_PROMPT,
     DECISION_FIRST_SYSTEM_PROMPT,
     OutcomePredictor,
     build_user_prompt,
@@ -58,6 +59,39 @@ def test_predictor_repairs_exactly_once():
     assert label is OutcomeLabel.A_WIN
     assert backend.calls == 2
     assert "---REPAIR---" in raw
+    assert predictor.last_diagnostics.output_repair_used
+    assert predictor.last_diagnostics.output_verification == "not_required"
+
+
+def test_repair_reuses_original_evidence_prompt_instead_of_invalid_output():
+    class CapturingRepairBackend(RepairBackend):
+        def __init__(self):
+            super().__init__()
+            self.prompts = []
+
+        def generate(self, system_prompt, user_prompt):
+            self.prompts.append(user_prompt)
+            return super().generate(system_prompt, user_prompt)
+
+    backend = CapturingRepairBackend()
+    predictor = OutcomePredictor(backend)
+    predictor.predict(
+        InferenceCase("case_1", "tranh chấp trả nợ"),
+        [
+            CaseEvidence(
+                "opaque",
+                "Hội đồng xét xử chấp nhận toàn bộ yêu cầu.",
+                1.0,
+                "operative_verdict",
+            )
+        ],
+        [],
+    )
+
+    assert len(backend.prompts) == 2
+    assert "tranh chấp trả nợ" in backend.prompts[1]
+    assert "Hội đồng xét xử chấp nhận toàn bộ yêu cầu." in backend.prompts[1]
+    assert "not json" not in backend.prompts[1]
 
 
 def test_decision_first_prompt_prioritizes_main_claim_and_decision_evidence():
@@ -120,6 +154,25 @@ def test_partial_prediction_runs_deterministic_verifier():
     assert reasoning == "đã kiểm tra"
     assert backend.calls == 2
     assert "---VERIFICATION---" in raw
+    assert predictor.last_diagnostics.output_verification == "passed"
+
+
+def test_failed_partial_verification_is_exposed_in_diagnostics():
+    backend = QueueBackend(
+        [
+            '{"main_claim":"x","accepted_scope":"một phần",'
+            '"acceptance_ratio":0.4,"reasoning":"bước đầu",'
+            '"label":"PARTIAL_B_WIN"}',
+            "not json",
+        ]
+    )
+    predictor = OutcomePredictor(backend)
+
+    label, _, raw = predictor.predict(InferenceCase("case_1", "query"), [], [])
+
+    assert label is OutcomeLabel.PARTIAL_B_WIN
+    assert "---VERIFICATION_FAILED---" in raw
+    assert predictor.last_diagnostics.output_verification == "failed"
 
 
 class WordTokenizer:
@@ -231,6 +284,27 @@ def test_create_predictor_forwards_optional_adapter_without_loading_models(
     assert predictor.system_prompt == DECISION_FIRST_SYSTEM_PROMPT
     assert predictor.context_law_top_k == 3
     assert predictor.oom_context_law_top_k == 2
+
+
+def test_compact_prompt_variant_is_available_without_loading_models(monkeypatch):
+    class StubBackend:
+        def __init__(self, **kwargs):
+            pass
+
+        def generate(self, system_prompt, user_prompt):
+            return '{"reasoning":"x","label":"A_WIN"}'
+
+    monkeypatch.setattr(
+        prediction_module, "TransformersQwenBackend", StubBackend
+    )
+    predictor = prediction_module.create_predictor(
+        {
+            "model_name": "Qwen/Qwen3-8B",
+            "prompt_variant": "decision_first_v3",
+        }
+    )
+
+    assert predictor.system_prompt == DECISION_FIRST_COMPACT_SYSTEM_PROMPT
 
 
 def test_predictor_activates_compact_oom_profile():
@@ -578,6 +652,8 @@ def test_prediction_retry_metadata_survives_checkpoint_resume(tmp_path):
         prediction=OutcomeLabel.A_WIN,
         prediction_attempts=3,
         prediction_failure_types=["RuntimeError", "ValueError"],
+        output_repair_used=True,
+        output_verification="failed",
     )
     store.put(result)
 
@@ -586,3 +662,5 @@ def test_prediction_retry_metadata_survives_checkpoint_resume(tmp_path):
     assert restored is not None
     assert restored.prediction_attempts == 3
     assert restored.prediction_failure_types == ["RuntimeError", "ValueError"]
+    assert restored.output_repair_used
+    assert restored.output_verification == "failed"

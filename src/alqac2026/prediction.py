@@ -55,10 +55,37 @@ acceptance_ratio phải nằm trong [0, 1] nếu có thể xác định; dùng n
 không đủ để định lượng. label phải nhất quán với acceptance_ratio và quy tắc trên.
 """
 
+DECISION_FIRST_COMPACT_SYSTEM_PROMPT = """Bạn là hệ thống phân loại kết quả vụ án dân sự Việt Nam.
+Chỉ sử dụng case_query, case evidence và law evidence được cung cấp. Không bổ sung
+tình tiết bên ngoài evidence.
+
+Thực hiện lần lượt:
+1. Xác định yêu cầu chính của nguyên đơn trong case_query.
+2. Ưu tiên phần Tuyên xử, Quyết định hoặc câu thể hiện chấp nhận/bác yêu cầu trong
+   case evidence khi các nguồn xung đột.
+3. Loại án phí, thủ tục, yêu cầu độc lập của người khác và vấn đề phụ khỏi tỷ lệ.
+4. So sánh phạm vi được yêu cầu với phạm vi được Tòa chấp nhận.
+
+Quy tắc nhãn:
+- A_WIN: chấp nhận toàn bộ yêu cầu chính.
+- PARTIAL_A_WIN: chấp nhận một phần lớn hơn 50%.
+- PARTIAL_B_WIN: chấp nhận một phần không quá 50%.
+- B_WIN: bác toàn bộ yêu cầu chính hoặc nguyên đơn không nhận được phần nào.
+
+Trả về ngay đúng một JSON object trên một dòng, không markdown, không lời dẫn và
+không văn bản sau dấu đóng object:
+{"main_claim":"yêu cầu chính","accepted_scope":"phần được chấp nhận",
+"acceptance_ratio":0.6,"reasoning":"tối đa 20 từ","label":"NHÃN"}
+
+acceptance_ratio nằm trong [0, 1], hoặc null khi không thể định lượng. label chỉ được
+là A_WIN, PARTIAL_A_WIN, PARTIAL_B_WIN hoặc B_WIN và phải nhất quán với tỷ lệ.
+"""
+
 
 SYSTEM_PROMPTS = {
     "baseline_v1": BASELINE_SYSTEM_PROMPT,
     "decision_first_v2": DECISION_FIRST_SYSTEM_PROMPT,
+    "decision_first_v3": DECISION_FIRST_COMPACT_SYSTEM_PROMPT,
 }
 
 # Backward-compatible default used by direct unit/integration construction.
@@ -83,6 +110,12 @@ PRIORITY = {
 
 class GenerationBackend(Protocol):
     def generate(self, system_prompt: str, user_prompt: str) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PredictionDiagnostics:
+    output_repair_used: bool = False
+    output_verification: str = "not_required"
 
 
 def build_user_prompt(
@@ -469,6 +502,7 @@ class OutcomePredictor:
         self.verification_reserve_tokens = verification_reserve_tokens
         self.oom_max_input_tokens = oom_max_input_tokens
         self.oom_context_law_top_k = oom_context_law_top_k
+        self.last_diagnostics = PredictionDiagnostics()
 
     def activate_oom_recovery(self) -> bool:
         """Use a smaller prompt while retaining the exact prepared evidence."""
@@ -534,20 +568,23 @@ class OutcomePredictor:
             law_top_k=self.context_law_top_k,
         )
 
-    def _parse_or_repair(self, raw: str) -> tuple[ParsedPrediction, str]:
+    def _parse_or_repair(
+        self, raw: str, original_prompt: str
+    ) -> tuple[ParsedPrediction, str, bool]:
         try:
-            return parse_structured_prediction(raw), raw
+            return parse_structured_prediction(raw), raw, False
         except (KeyError, ValueError, json.JSONDecodeError) as first_error:
-            repair = (
-                "Đầu ra trước không hợp lệ. Hãy sửa thành đúng một JSON object có "
-                "main_claim, accepted_scope, acceptance_ratio, reasoning và label; "
-                "label phải thuộc A_WIN, PARTIAL_A_WIN, PARTIAL_B_WIN, B_WIN. "
-                f"Đầu ra lỗi:\n{raw[:1500]}"
-            )
+            repair = f"""{original_prompt}
+
+## Yêu cầu sửa định dạng
+Đầu ra trước không hợp lệ. Đọc lại chính evidence ở trên và trả lời lại ngay bằng
+đúng một JSON object có main_claim, accepted_scope, acceptance_ratio, reasoning và
+label. reasoning tối đa 20 từ. Không markdown, không lời dẫn và không văn bản sau
+dấu đóng object."""
             repaired = self.backend.generate(self.system_prompt, repair)
             try:
                 parsed = parse_structured_prediction(repaired)
-                return parsed, f"{raw}\n---REPAIR---\n{repaired}"
+                return parsed, f"{raw}\n---REPAIR---\n{repaired}", True
             except (KeyError, ValueError, json.JSONDecodeError) as second_error:
                 raise ValueError(
                     "Prediction output failed validation twice: "
@@ -560,13 +597,15 @@ class OutcomePredictor:
         case_evidence: list[CaseEvidence],
         law_evidence: list[LawEvidence],
     ) -> tuple[OutcomeLabel, str, str]:
+        self.last_diagnostics = PredictionDiagnostics()
         prompt = self._build_prompt(case, case_evidence, law_evidence)
         raw = self.backend.generate(self.system_prompt, prompt)
-        parsed, combined_raw = self._parse_or_repair(raw)
+        parsed, combined_raw, repair_used = self._parse_or_repair(raw, prompt)
         needs_verification = parsed.inconsistent or parsed.label in {
             OutcomeLabel.PARTIAL_A_WIN,
             OutcomeLabel.PARTIAL_B_WIN,
         }
+        verification_status = "not_required"
         if needs_verification:
             verification = self._build_verification_prompt(prompt, combined_raw)
             try:
@@ -575,8 +614,14 @@ class OutcomePredictor:
                 combined_raw = (
                     f"{combined_raw}\n---VERIFICATION---\n{verified_raw}"
                 )
+                verification_status = "passed"
             except (KeyError, ValueError, json.JSONDecodeError):
                 combined_raw = f"{combined_raw}\n---VERIFICATION_FAILED---"
+                verification_status = "failed"
+        self.last_diagnostics = PredictionDiagnostics(
+            output_repair_used=repair_used,
+            output_verification=verification_status,
+        )
         return parsed.label, parsed.reasoning, combined_raw
 
     def _build_verification_prompt(self, prompt: str, raw: str) -> str:
