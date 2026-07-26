@@ -1,83 +1,108 @@
-# ALQAC 2026 — Agentic RAG cho Dự đoán Kết quả Vụ án Dân sự
+# ALQAC 2026 — Legal Case Outcome Prediction (Team K23)
 
-Repo của team **K23** cho cuộc thi **ALQAC 2026** (Automated Legal Question Answering Competition, tổ chức cùng hội nghị KSE). Bài toán năm nay: cho một mô tả ngắn về vụ tranh chấp dân sự, hệ thống tự đi tìm bằng chứng và điều luật rồi **dự đoán kết quả vụ kiện sơ thẩm**.
+A reproducible pipeline for the ALQAC 2026 Legal Case Outcome Prediction with
+Evidence Retrieval task. Given a case described only by its `case_id` and a short
+`case_query`, the system predicts a four-class trial outcome and returns the
+supporting case-evidence chunks and law provisions.
 
-## Bài toán
+## Pipeline
 
-Đầu vào là `case_query` (một đoạn tiếng Việt mô tả tranh chấp). Đầu ra gồm ba phần:
+The pipeline runs in four stages, all under `src/alqac2026/`:
 
-- **Dự đoán kết quả** — một trong bốn nhãn: `A_WIN` (nguyên đơn thắng toàn bộ), `PARTIAL_A_WIN` (thắng một phần), `B_WIN` (bị đơn thắng), `PARTIAL_B_WIN` (bị đơn thắng phần lớn).
-- **Bằng chứng vụ án** (`case_evidence`) — các đoạn nội dung vụ án, lấy qua Evidence Retrieval API của BTC.
-- **Điều luật liên quan** (`law_evidence`) — truy hồi từ corpus luật.
+1. **Case-evidence retrieval** (`case_retrieval.py`) — queries the official Case
+   Content API with a prioritized bank of section-targeted queries, with a local
+   SQLite cache, request throttling, and a saturation early-stop that bounds the
+   number of API calls per case.
+2. **Law retrieval** (`citations.py`, `law_retrieval.py`) — extracts the law
+   provisions the court cited literally in the retrieved evidence, adds a small
+   set of near-universal civil-procedure articles as a prior, and falls back to a
+   hybrid BM25 + dense-embedding + reranker search when no citation context is
+   available.
+3. **Outcome prediction** (`prediction.py`, `ensemble.py`, `vks.py`) — predicts
+   one of `A_WIN`, `PARTIAL_A_WIN`, `PARTIAL_B_WIN`, `B_WIN` with a Qwen3-8B
+   ensemble. Each signal is a configuration toggle: self-consistency majority
+   voting, precedent case-based reasoning over the labelled public cases, a
+   reasoning ("thinking") adjudicator, an extracted procuracy (Viện Kiểm Sát /
+   VKS) stance, and dual-advocate debate.
+4. **Submission assembly** (`submission.py`) — builds and strictly validates the
+   `submission.json` against the corpus and the input case set.
 
-Điểm được tính theo công thức:
+The prediction step reads no gold label of the case being predicted; precedents
+surface other cases' labels only and always exclude the queried case.
+
+## Repository layout
 
 ```
-FinalScore = 0.70 · Outcome Accuracy + 0.20 · Penalized Case Recall + 0.10 · Micro Law F1
+src/alqac2026/     Pipeline modules (retrieval, prediction, ensemble, submission, evaluation)
+configs/           Run configurations: baseline.yaml, candidate.yaml, ensemble.yaml
+scripts/           Entry points: run_public, run_private, validate_submission, and helpers
+tests/             Unit tests
+notebooks/         colab_submission.ipynb — run harness for public and private phases
+docs/              Architecture, competition rules, runbook, and technical-report outline
 ```
 
-Trong đó Penalized Case Recall có phạt theo số lần gọi API (không phạt tới `2·n`, giảm về 0 ở `5·n`, với `n` là số đoạn của vụ).
+## Installation
 
-## Dữ liệu
+Requires Python 3.10+.
 
-- `corpus_law_pub.json` — 18 bộ luật, 3.352 điều (BLDS, BLTTDS, Đất đai, HN&GĐ...).
-- `ALQAC2026_public_test.json` — 50 vụ dân sự có đầy đủ nhãn, dùng làm tập phát triển.
-
-Lưu ý: **tập private (tính điểm) chỉ cho `case_id` + `case_query`**, nội dung vụ án bị giấu và chỉ truy cập được qua API. Mọi pipeline không được phụ thuộc vào các trường chi tiết chỉ có ở public test.
-
-## Cách tiếp cận
-
-Pipeline dạng Agentic RAG, toàn bộ dùng model **mã nguồn mở dưới 10B tham số** (đúng luật thi — cấm GPT/Claude/Gemini trong hệ thống):
-
-1. **Gom bằng chứng** — sinh nhiều truy vấn nhắm các đoạn *Quyết định / Nhận định của Tòa*, gọi Evidence API để lấy các `chunk_id` liên quan.
-2. **Truy hồi luật** — BM25 trên corpus, xuất `law_evidence` dạng `{law_id, aid}`.
-3. **Suy luận & dự đoán** — đưa bằng chứng + điều luật vào **Qwen2.5-7B-Instruct** (nạp 4-bit), prompt theo tam đoạn luận pháp lý (IRAC), nhấn mạnh phân biệt thắng-toàn-bộ / thắng-một-phần.
-
-Model đặt trong `src/`, chi tiết pipeline trong notebook `ALQAC2026_final.ipynb`.
-
-## Kết quả (trên public test, 50 vụ)
-
-| Thành phần | Kết quả |
-|---|---|
-| Outcome Accuracy | ~52% |
-| Penalized Case Recall | ~24% |
-| Micro Law F1 | ~16% |
-| **Final Score** | **~0.43** |
-
-Đây là điểm của một hệ thống thật (không dùng đáp án có sẵn trong file public), nên kỳ vọng giữ được khi sang private test. Phân tích chi tiết và các hướng đã thử (precedent-RAG, hybrid retrieval...) nằm trong báo cáo.
-
-## Cách chạy
-
-Notebook thiết kế cho Google Colab (GPU T4):
-
-1. Mở `ALQAC2026_final.ipynb` trên Colab, chọn Runtime ▸ GPU (T4).
-2. Upload `alqac2026_starter.zip` (code) và 2 file dữ liệu.
-3. Đặt token của team qua Colab Secrets (tên `ALQAC_TEAM_TOKEN`).
-4. Chạy lần lượt các cell → sinh ra `submission.json`.
-
-Chạy local cũng được: `pip install -r requirements.txt`, cần một GPU cho model 7B.
-
-## Cách nộp
-
-Nộp bằng cách **upload file `submission.json` lên trang leaderboard**. Giới hạn **20 lần / 24 giờ**. File là một JSON array, mỗi vụ một object:
-
-```json
-{
-  "case_id": "case_0001",
-  "prediction": "A_WIN",
-  "law_evidence": [{"law_id": "91/2015/QH13", "aid": 53373}],
-  "case_evidence": ["case_0001_chunk_2"],
-  "api_calls": 8
-}
+```bash
+python -m pip install -e .
 ```
 
-Nên tự chấm offline trên public test trước, chỉ nộp cấu hình tốt hơn.
+Copy `.env.example` to `.env` and set `ALQAC_TEAM_TOKEN` (the Case Content API
+credential). On Colab or Kaggle, provide it through the platform's secrets
+manager instead of committing it.
 
+## Running
 
-## Lưu ý
+Both entry points take a `--config` and an `--input` file and write a validated
+submission plus a run manifest into the output directory.
 
-- **Không commit token bí mật** lên GitHub (đã chặn trong `.gitignore`). Dùng Colab Secrets hoặc file `.env`.
-- Chỉ được dùng model open-weight < 10B; không gọi API model độc quyền trong pipeline.
+```bash
+# Public phase
+python scripts/run_public.py \
+  --config configs/ensemble.yaml \
+  --input data/raw/ALQAC2026_public_test.json
 
----
-Team K23 — ALQAC 2026.
+# Private phase (input released by the organizers)
+python scripts/run_private.py \
+  --config configs/ensemble.yaml \
+  --input path/to/private_test.json
+```
+
+`configs/ensemble.yaml` enables the full outcome ensemble (self-consistency 5,
+precedents, thinking). `configs/baseline.yaml` and `configs/candidate.yaml`
+provide lighter configurations. Add `--mock` for a dependency-free smoke run that
+uses neither the API nor a GPU, or `--limit N` to run the first `N` cases.
+
+The Colab harness in `notebooks/colab_submission.ipynb` wraps the same commands
+for a GPU runtime, including cache persistence and resumable runs.
+
+## Validating a submission
+
+```bash
+python scripts/validate_submission.py \
+  --input submission.json \
+  --test-data data/raw/ALQAC2026_public_test.json \
+  --law-corpus data/raw/corpus_law_pub.json
+```
+
+The validator checks case coverage, label validity, evidence shapes, chunk-id
+prefixes, and law-provision references, and fails loudly on any violation.
+
+## Models
+
+All models are open-weight and under 10B parameters:
+
+- Outcome prediction: `Qwen/Qwen3-8B` (loaded in 4-bit)
+- Law embedding: `AITeamVN/Vietnamese_Embedding`
+- Law reranking: `AITeamVN/Vietnamese_Reranker`
+
+Model revisions are pinned in the config files and recorded in each run manifest
+for reproducibility.
+
+## Tests
+
+```bash
+pytest -q
+```
